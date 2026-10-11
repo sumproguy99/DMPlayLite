@@ -38,10 +38,11 @@ Environment: `PORT` (8787), `PLAYLITE_DATA` (config folder, `./data`), `ANTHROPI
 | **Alexa** | Local emulated Hue bridge: "Alexa, discover devices" → groups and voice-named workflows appear. No skill, no cloud |
 | **Siri** | Shortcuts → `/run/<workflow>` to run, `/ask?q=` to ask the AI anything (spoken reply) |
 | **AI agents** | MCP server at `/mcp` (Claude Code: `claude mcp add --transport http playlite "<url>"`) with tools for lights, workflows, network, Home Assistant |
+| **House modes** | home / away / movie / sleep / guest — switch from the header, a workflow step, Siri (`/mode/<name>`) or the AI; "mode changes" trigger and "only if mode is…" condition |
 | **Phone alerts** | "📲 Phone alert" step pushes to the ntfy app (iOS/Android) — title, priority, emoji tags, tap-to-open link, `{{variables}}`; public ntfy.sh or self-hosted with an access token |
 | **Web** | Inbound `/hooks/<name>` (IFTTT, Zapier, Tasker, HA `rest_command`); outbound "Call a URL" step with `{{variables}}` |
 
-All machine endpoints (`/hooks`, `/run`, `/ask`, `/mcp`, `/webhooks/plex`) require the secret key shown in Connections
+All machine endpoints (`/hooks`, `/run`, `/mode`, `/ask`, `/mcp`, `/webhooks/plex`) require the secret key shown in Connections
 (`?key=` or `Authorization: Bearer`). The Alexa bridge is unauthenticated by design (Hue protocol) and only exposes
 groups and workflows you've given a voice name.
 

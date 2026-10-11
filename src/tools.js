@@ -21,15 +21,17 @@ TRIGGERS (source → event → optional filters):
 - time → time.at (with "at": "HH:MM", optional "days": [0-6], 0=Sunday) | sun.sunrise | sun.sunset (optional "offsetMin", negative = before).
 - webhook → any name, fired by GET/POST /hooks/<name>?key=… (Siri Shortcuts, IFTTT, Zapier, Home Assistant).
 - voice → alexa. Filter: device (spoken device name).
+- mode → mode.changed (the house mode was switched). Filters: to, from (mode names, see get_mode).
 CONDITIONS: timeWindow {"from":"HH:MM","to":"HH:MM"} · dark: true (after sunset/before sunrise) · light: true · fullMoon: true ·
-  presence {"device": "iPhone", "state": "home"|"away"}.
+  presence {"device": "iPhone", "state": "home"|"away"} · mode: "movie" or ["movie","sleep"] (current house mode is one of these).
 STEPS:
 - {"type":"set","brightness":0-100,"kelvin":2200-6500,"color":"#rrggbb","transitionMs":5000,"targets":[optional override]}  (brightness 0 = off; "natural light" ≈ 4000K, warm ≈ 2700K)
 - {"type":"pulse","levels":[100,70,100],"times":5,"stepMs":1000,"restore":true}
 - {"type":"wait","ms":2000}
 - {"type":"http","method":"POST","url":"https://…","body":{…}}   (strings may use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} from the event)
 - {"type":"ha","service":"switch.turn_on","data":{"entity_id":"switch.fan"}}
-- {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy; optional "topic" overrides the default set under Connections; priority 1-5, 5 = urgent)`;
+- {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy; optional "topic" overrides the default set under Connections; priority 1-5, 5 = urgent)
+- {"type":"mode","mode":"movie"}   (switch the house mode; this can trigger other workflows)`;
 
 export function normalizeWorkflow(w) {
   if (!w || typeof w !== 'object') throw new Error('Workflow must be an object');
@@ -40,7 +42,7 @@ export function normalizeWorkflow(w) {
   if (w.orTriggers && !w.orTriggers.length) delete w.orTriggers;
   if (!Array.isArray(w.steps) || !w.steps.length) throw new Error('Workflow needs at least one step');
   for (const s of w.steps) {
-    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
+    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
     if (s.type === 'pulse') {
       s.levels ??= [100, 70, 100];
       s.times ??= 3;
@@ -48,6 +50,7 @@ export function normalizeWorkflow(w) {
     }
     if (s.type === 'http' && !/^https?:\/\//.test(s.url ?? '')) throw new Error('http step needs a full http(s) URL');
     if (s.type === 'ha' && !/^\w+\.\w+$/.test(s.service ?? '')) throw new Error('ha step needs a service like "light.turn_on"');
+    if (s.type === 'mode' && !String(s.mode ?? '').trim()) throw new Error('mode step needs a mode, e.g. "movie"');
     if (s.type === 'notify') {
       if (!String(s.message ?? '').trim()) throw new Error('notify step needs a message');
       if (s.priority != null && s.priority !== '' && !(Number.isInteger(+s.priority) && +s.priority >= 1 && +s.priority <= 5)) throw new Error('notify priority must be 1-5');
@@ -157,6 +160,18 @@ export function createTools(ctx) {
         updateConfig((c) => (c.routines = c.routines.filter((x) => x.id !== r.id)));
         return { ok: true, deleted: r.name };
       },
+    },
+    {
+      name: 'get_mode',
+      description: 'The current house mode (e.g. home, away, movie, sleep, guest) and the list of available modes.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: async () => ({ mode: engine.mode, modes: getConfig().modes }),
+    },
+    {
+      name: 'set_mode',
+      description: 'Switch the house mode. Workflows triggered by mode changes run, and workflows with a mode condition start/stop applying.',
+      inputSchema: { type: 'object', properties: { mode: { type: 'string' } }, required: ['mode'], additionalProperties: false },
+      run: async (a) => ({ ok: true, changed: engine.setMode(a.mode, 'AI'), mode: engine.mode }),
     },
     {
       name: 'list_network_devices',

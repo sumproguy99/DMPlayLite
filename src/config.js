@@ -70,6 +70,8 @@ function defaults() {
     ai: { apiKey: '', model: '' },
     ntfy: { server: 'https://ntfy.sh', topic: '', token: '' },
     location: { lat: null, lon: null, name: '' },
+    mode: 'home',
+    modes: ['home', 'away', 'movie', 'sleep', 'guest'],
     groups: [
       { id: 'living-room', name: 'Living Room', members: [] },
       { id: 'basement', name: 'Basement', members: [] },

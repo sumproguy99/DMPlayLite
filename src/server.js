@@ -64,6 +64,8 @@ export function createServer(app) {
       user,
       routines: c.routines,
       groups: c.groups,
+      mode: engine.mode,
+      modes: c.modes,
       plex: { url: c.plex.url, hasToken: Boolean(c.plex.token), pollSeconds: c.plex.pollSeconds, status: plex.status },
       hue: { bridgeIp: c.hue.bridgeIp, paired: hue.ready, candidates: discovery.list().filter((d) => d.kind === 'hue-bridge').map((d) => d.ip) },
       govee: { multicastInterface: c.govee.multicastInterface, devices: govee.list() },
@@ -84,6 +86,7 @@ export function createServer(app) {
         plexWebhook: base.map((b) => `${b}/webhooks/plex?key=${key}`),
         hook: `${base[0]}/hooks/<name>?key=${key}`,
         run: `${base[0]}/run/<workflow>?key=${key}`,
+        mode: `${base[0]}/mode/<mode>?key=${key}`,
         ask: `${base[0]}/ask?key=${key}&q=`,
         mcp: `${base[0]}/mcp?key=${key}`,
       },
@@ -149,6 +152,15 @@ export function createServer(app) {
       if (!routine) throw new HttpError(404, 'No such workflow');
       engine.run(routine, { source: 'manual', type: 'run' });
       return { ok: true };
+    },
+    'POST /api/mode': async (req, url, user) => {
+      const { mode } = await readJson(req);
+      try {
+        engine.setMode(mode, user);
+      } catch (err) {
+        throw new HttpError(400, err.message);
+      }
+      return { ok: true, mode: engine.mode };
     },
     'POST /api/simulate': async (req) => {
       const event = await readJson(req);
@@ -364,6 +376,16 @@ export function createServer(app) {
       engine.run(r, { source: 'webhook', type: 'run' });
       return res.end(`Running ${r.voiceName ?? r.name}`);
     }
+    if (p.startsWith('/mode/')) {
+      // Siri: "Hey Siri, movie mode" → GET /mode/movie
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      try {
+        engine.setMode(decodeURIComponent(p.slice(6)), 'Siri/webhook');
+      } catch (err) {
+        return res.writeHead(400).end(err.message);
+      }
+      return res.writeHead(200).end(`House mode is now ${engine.mode}`);
+    }
     // Generic: /hooks/<name>  → trigger { source: 'webhook', event: '<name>' }
     const name = decodeURIComponent(p.slice('/hooks/'.length));
     const body = req.method === 'POST' ? await readJson(req).catch(() => ({})) : {};
@@ -415,7 +437,7 @@ export function createServer(app) {
     const url = new URL(req.url, 'http://local');
     const p = url.pathname;
     try {
-      if (p === '/webhooks/plex' || p.startsWith('/hooks/') || p.startsWith('/run/') || p === '/ask' || p === '/mcp') return await handleKeyed(req, res, url);
+      if (p === '/webhooks/plex' || p.startsWith('/hooks/') || p.startsWith('/run/') || p.startsWith('/mode/') || p === '/ask' || p === '/mcp') return await handleKeyed(req, res, url);
       if (['/api/auth/status', '/api/auth/login', '/api/auth/setup'].includes(p)) return await handleAuthPublic(req, res, url);
       if (OPEN_FILES.has(p)) return serveStatic(res, p);
 

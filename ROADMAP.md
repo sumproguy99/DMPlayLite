@@ -224,11 +224,11 @@ Ideas: person in driveway after dark → porch lights 100% for 5 min · package 
 
 ## Suggested build order
 
-**Done so far:** login · IF/THEN builder + AI drafting · always-on network discovery · Home Assistant bridge · Alexa (local) · Siri Shortcuts · MCP for AI agents · sun/moon/schedule triggers · webhooks in & out · ntfy phone alerts.
+**Done so far:** login · IF/THEN builder + AI drafting · always-on network discovery · Home Assistant bridge · Alexa (local) · Siri Shortcuts · MCP for AI agents · sun/moon/schedule triggers · webhooks in & out · ntfy phone alerts · OR triggers · house modes.
 
 **Phase 1 — Platform** (makes everything else cheap)
 1. Plugin API + capability model; move Plex/Hue/Govee into plugins
-2. ✅ Multiple triggers (OR) · AND/OR conditions, "for N minutes", house modes, scenes
+2. ✅ Multiple triggers (OR) · ✅ house modes · AND/OR conditions, "for N minutes", scenes
 3. **Sun / moon / schedule triggers** (offline, no setup)
 4. ✅ **ntfy phone notifications** as an action
 

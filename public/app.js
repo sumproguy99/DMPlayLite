@@ -7,6 +7,7 @@ const SOURCES = [
   { id: 'homeassistant', icon: '🏠', name: 'Home Assistant', blurb: 'Any sensor, switch, lock…' },
   { id: 'time', icon: '🌅', name: 'Time & sun', blurb: 'Clock, sunrise, sunset' },
   { id: 'webhook', icon: '🔗', name: 'Webhook / Siri', blurb: 'Shortcuts, IFTTT, Zapier, anything' },
+  { id: 'mode', icon: '🎭', name: 'House mode', blurb: 'Home, away, movie, sleep…' },
 ];
 const EVENTS = {
   plex: [
@@ -30,6 +31,7 @@ const EVENTS = {
     ['sun.sunrise', 'At sunrise'],
   ],
   webhook: [],
+  mode: [['mode.changed', 'House mode changes']],
 };
 const MEDIA_TYPES = [['movie', 'Movies'], ['episode', 'TV episodes'], ['clip', 'Clips'], ['track', 'Music']];
 const WHITES = [[2200, 'Candle'], [2700, 'Warm'], [3000, 'Soft'], [4000, 'Natural'], [5000, 'Daylight'], [6500, 'Cool']];
@@ -41,7 +43,9 @@ const STEP_TYPES = [
   ['http', '🌐', 'Call a URL'],
   ['ha', '🏠', 'Home Assistant action'],
   ['notify', '📲', 'Phone alert'],
+  ['mode', '🎭', 'Set house mode'],
 ];
+const modeOptions = (selected, anyLabel) => `${anyLabel ? `<option value="">${anyLabel}</option>` : ''}${S.state.modes.map((m) => `<option value="${esc(m)}" ${selected === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}`;
 const NTFY_PRIORITIES = [[1, 'Min'], [2, 'Low'], [3, 'Normal'], [4, 'High'], [5, 'Urgent']];
 const KIND_ICON = {
   phone: '📱', tablet: '📱', apple: '🍎', computer: '💻', printer: '🖨', router: '🛜', camera: '📷', doorbell: '🔔',
@@ -139,6 +143,7 @@ async function refreshNetwork() {
 
 // ---------- header ----------
 function renderHeader() {
+  if (document.activeElement?.id === 'mode-pick') return; // don't close the mode menu while it's open
   const st = S.state;
   const p = st.plex;
   const pill = (dot, text) => `<span class="pill"><span class="dot ${dot}"></span>${text}</span>`;
@@ -152,9 +157,15 @@ function renderHeader() {
     pill(!haS.hasToken ? '' : haS.status.connected ? 'ok' : 'bad', 'Home Assistant'),
     pill(st.alexa.status.http === 'listening' ? 'ok' : st.alexa.enabled ? 'bad' : '', 'Alexa'),
     pill(st.ai.ready ? 'ok' : '', 'AI'),
+    `<label class="pill mode" title="House mode">🎭 <select id="mode-pick">${modeOptions(st.mode)}</select></label>`,
     `<button class="pill user" id="account-btn" title="Account">👤 ${esc(st.user)}</button>`,
   ].join('');
   $('#account-btn').onclick = openAccount;
+  $('#mode-pick').onchange = guard(async (e) => {
+    const { mode } = await api('POST', '/api/mode', { mode: e.target.value });
+    S.state.mode = mode;
+    toast(`House mode: ${mode}`);
+  });
 }
 
 // ---------- routines ----------
@@ -163,6 +174,7 @@ function describeStep(step) {
   if (step.type === 'wait') return `⏱ wait ${sec(step.ms)}s`;
   if (step.type === 'http') return `🌐 ${esc(step.method ?? 'POST')} ${esc(step.url)}`;
   if (step.type === 'ha') return `🏠 ${esc(step.service)} ${esc(step.data?.entity_id ?? '')}`;
+  if (step.type === 'mode') return `🎭 house mode → <b>${esc(step.mode)}</b>`;
   if (step.type === 'notify') return `📲 “${esc(step.title ? `${step.title}: ${step.message}` : step.message)}”${step.topic ? ` → ${esc(step.topic)}` : ''}${step.priority >= 4 ? ' (high priority)' : ''}`;
   if (step.type === 'pulse') return `✨ pulse ${step.levels.join('→')}% ×${step.times} (${sec(step.stepMs)}s/step)${step.restore ? ', then restore' : ''}${t}`;
   const parts = [];
@@ -180,6 +192,7 @@ function describeTrigger(tr) {
   if (tr.source === 'webhook') text = `webhook ${b(tr.event)} is called`;
   else if (tr.source === 'time' && tr.event === 'time.at') text = `it's ${b(tr.at)}${tr.days?.length && tr.days.length < 7 ? ` on ${tr.days.map((d) => DAYS[d]).join(', ')}` : ''}`;
   else if (tr.source === 'time') text = `${b(tr.event === 'sun.sunset' ? 'sunset' : 'sunrise')}${tr.offsetMin ? ` ${tr.offsetMin > 0 ? '+' : '−'}${Math.abs(tr.offsetMin)} min` : ''}`;
+  else if (tr.source === 'mode') text = `house mode changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
   else if (tr.source === 'homeassistant') text = `${b(tr.entity || 'any entity')} changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
   else text = b(eventLabel(tr.source, tr.event));
   const bits = [text];
@@ -197,6 +210,7 @@ function describeConditions(r) {
   if (c.dark) out.push('when dark');
   if (c.light) out.push('when light out');
   if (c.fullMoon) out.push('full moon');
+  if (c.mode?.length) out.push(`mode is ${[c.mode].flat().join(' or ')}`);
   if (c.presence?.device) out.push(`${c.presence.device} is ${c.presence.state}`);
   if (r.cooldownSec) out.push(`cooldown ${r.cooldownSec}s`);
   return out.length ? `<div class="when muted">Only if ${out.map(esc).join(' · ')}</div>` : '';
@@ -330,6 +344,12 @@ function triggerFields(tr, base = 'trigger') {
       <label class="field">To<input type="text" data-bind="${base}.to" value="${esc(tr.to)}" placeholder="e.g. on"></label></div>
       ${S.state.homeassistant.status.connected ? '' : '<p class="small muted">Connect Home Assistant under Connections first.</p>'}`;
   }
+  if (tr.source === 'mode') {
+    return `<div class="fields">
+      <label class="field grow">From<select data-bind="${base}.from">${modeOptions(tr.from, 'any mode')}</select></label>
+      <label class="field grow">To<select data-bind="${base}.to">${modeOptions(tr.to, 'any mode')}</select></label></div>
+      <p class="small muted">Switch modes from the menu at the top, a “🎭 Set house mode” step, Siri (Connections → Siri) or the AI.</p>`;
+  }
   if (tr.source === 'time') {
     const sunNote = S.state.location?.lat ? '' : '<p class="small" style="color:var(--warn)">Set your location under Connections → Location for sunrise/sunset.</p>';
     return `<div class="fields">${eventSelect}
@@ -390,6 +410,8 @@ function stepEditor(step, i) {
         <datalist id="hasvc">${['light.turn_on', 'light.turn_off', 'switch.turn_on', 'switch.turn_off', 'scene.turn_on', 'script.turn_on', 'climate.set_temperature', 'media_player.media_pause', 'media_player.media_play', 'lock.lock', 'cover.close_cover', 'notify.notify', 'tts.speak'].map((s) => `<option value="${s}">`).join('')}</datalist>
         <label class="field grow">Entity<input type="text" data-bind="${p}.data.entity_id" value="${esc(step.data?.entity_id)}" placeholder="switch.fan" list="haents"></label>
       </div>`;
+  } else if (step.type === 'mode') {
+    body = `<div class="fields"><label class="field grow">Switch the house mode to<select data-bind="${p}.mode">${modeOptions(step.mode)}</select></label></div>`;
   } else if (step.type === 'notify') {
     const topicSet = Boolean(S.state.ntfy?.topic);
     body = `<div class="fields">
@@ -476,6 +498,9 @@ function renderEditor() {
           <label class="field">&nbsp;<select data-bind="conditions.presence.state">${['home', 'away'].map((s) => `<option ${c.presence?.state === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
           <label class="field">Cooldown (s)<input type="number" min="0" data-bind="cooldownSec" data-type="num" value="${d.cooldownSec ?? ''}" placeholder="none"></label>
         </div>
+        <div class="row small" style="margin-top:10px">🎭 House mode is
+          ${S.state.modes.map((m) => `<label class="daychip"><input type="checkbox" data-list="conditions.mode" value="${esc(m)}" ${[c.mode].flat().includes(m) ? 'checked' : ''}><span>${esc(m)}</span></label>`).join('')}
+          <span class="muted">${c.mode?.length ? '' : '(any)'}</span></div>
       </div>
 
       <div class="block then">
@@ -575,12 +600,15 @@ function wireEditor() {
     el.onchange = () => {
       const path = el.dataset.list;
       const val = el.hasAttribute('data-num') ? Number(el.value) : el.value;
-      const cur = getPath(draft, path) ?? (path.endsWith('.days') ? [0, 1, 2, 3, 4, 5, 6] : []);
+      const raw = getPath(draft, path);
+      const cur = raw == null ? (path.endsWith('.days') ? [0, 1, 2, 3, 4, 5, 6] : []) : [raw].flat();
       const set = new Set(cur);
       el.checked ? set.add(val) : set.delete(val);
       let next = [...set];
       if (path.endsWith('.days')) next = next.length === 7 ? undefined : next.sort();
+      if (path === 'conditions.mode') next = next.length ? next : undefined;
       setPath(draft, path, next);
+      if (path === 'conditions.mode') renderEditor();
     };
   });
   dlg.querySelectorAll('[data-steptype]').forEach((el) => (el.onchange = () => {
@@ -664,6 +692,7 @@ function newStep(type) {
   if (type === 'http') return { type, method: 'POST', url: '' };
   if (type === 'ha') return { type, service: 'switch.turn_on', data: { entity_id: '' } };
   if (type === 'notify') return { type, message: '', priority: 3 };
+  if (type === 'mode') return { type, mode: S.state.modes.find((m) => m !== S.state.mode) ?? S.state.modes[0] };
   return { type: 'set', brightness: 50, transitionMs: 3000 };
 }
 
@@ -897,6 +926,8 @@ function renderConnections() {
         <p class="small muted" style="margin:0">In the iPhone <b>Shortcuts</b> app: New Shortcut → <b>Get Contents of URL</b> → paste a link below → name the shortcut (that's what you say to Siri).</p>
         <div class="small"><b>Run a workflow</b> — e.g. “Hey Siri, Movie Mode”:</div>
         ${copyBox(urls.run.replace('<workflow>', encodeURIComponent(S.state.routines.find((r) => r.voiceName)?.voiceName ?? 'Movie Mode')))}
+        <div class="small"><b>Switch the house mode</b> — e.g. “Hey Siri, movie mode” (change <code>movie</code> to any mode):</div>
+        ${copyBox(urls.mode.replace('<mode>', 'movie'))}
         <div class="small"><b>Ask Playlite anything</b> — add <i>Dictate Text</i> first, put it after <code>q=</code>, then <i>Speak Text</i> the result:</div>
         ${copyBox(urls.ask)}
         <p class="small muted" style="margin:0">Also great as iPhone Personal Automations: arrive home, leave, alarm stopped, Focus on, NFC tag tapped.</p>
@@ -1164,7 +1195,7 @@ try {
 if (saved && saved !== 'routines' && document.getElementById(`tab-${saved}`)) showTab(saved);
 
 setInterval(() => api('GET', '/api/state').then((s) => {
-  Object.assign(S.state, { plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
+  Object.assign(S.state, { mode: s.mode, modes: s.modes, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
   renderHeader();
 }).catch(() => {}), 10_000);
 setInterval(() => {

@@ -8,8 +8,9 @@
 //   time           event: time.at (at "HH:MM", days [0-6]) | sun.sunrise | sun.sunset (offsetMin)   — fired by the scheduler
 //   webhook        event: <name>   (/hooks/<name>, Siri Shortcuts, IFTTT, Zapier, HA rest_command…)
 //   voice          event: alexa    device (exposed name contains)
-// Conditions: timeWindow {from,to} · dark · fullMoon · presence {device, state: home|away} · cooldownSec
-// Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click}
+//   mode           event: mode.changed  to, from (house mode names)
+// Conditions: timeWindow {from,to} · dark · fullMoon · presence {device, state: home|away} · mode (name or list) · cooldownSec
+// Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click} · mode {mode}
 import { Token, contains, sleep } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
 
@@ -74,16 +75,42 @@ const LIGHT_STEPS = new Set(['set', 'pulse']);
 export class Engine {
   #lastRun = new Map(); // routine id -> timestamp
 
-  constructor({ getConfig, lights, log, discovery = null, ha = null }) {
+  #modeChanges = []; // timestamps, to stop workflows flipping the mode back and forth forever
+
+  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null }) {
     this.getConfig = getConfig;
+    this.updateConfig = updateConfig;
     this.lights = lights;
     this.log = log;
     this.discovery = discovery;
     this.ha = ha;
   }
 
+  // House mode: one current mode (home, away, movie…). Changing it fires { source: 'mode', type: 'mode.changed', from, to }.
+  get mode() {
+    return this.getConfig().mode ?? 'home';
+  }
+
+  // byWorkflow: changes made by a workflow step count toward the loop guard; a person (UI, Siri, AI) always wins and resets it.
+  setMode(mode, by = 'manual', { byWorkflow = false } = {}) {
+    const to = String(mode ?? '').trim().toLowerCase();
+    const modes = this.getConfig().modes ?? [];
+    if (!modes.includes(to)) throw new Error(`Unknown mode "${mode}" — use one of: ${modes.join(', ')}`);
+    const from = this.mode;
+    if (from === to) return false;
+    const now = Date.now();
+    if (byWorkflow) {
+      this.#modeChanges = this.#modeChanges.filter((t) => now - t < 10_000);
+      if (this.#modeChanges.length >= 10) throw new Error('Mode changed 10 times in 10 seconds — two workflows are probably switching it back and forth');
+      this.#modeChanges.push(now);
+    } else this.#modeChanges = [];
+    this.updateConfig((c) => (c.mode = to));
+    this.handle({ source: 'mode', type: 'mode.changed', from, to, by, at: new Date().toISOString() });
+    return true;
+  }
+
   handle(event) {
-    const desc = [event.type, event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`]
+    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`]
       .filter(Boolean)
       .join(' ');
     if (!event.quiet) this.log.event(`${event.source}: ${desc}`, event);
@@ -117,6 +144,7 @@ export class Engine {
     if (c.dark && !isDark(now, loc.lat, loc.lon)) return 'it is daytime';
     if (c.light && isDark(now, loc.lat, loc.lon)) return 'it is dark';
     if (c.fullMoon && !isFullMoon(now)) return 'not a full moon';
+    if (c.mode?.length && ![c.mode].flat().includes(this.mode)) return `mode is ${this.mode}`;
     if (c.presence?.device && this.discovery) {
       const home = this.discovery.find(c.presence.device).some((d) => d.online);
       if (c.presence.state === 'home' && !home) return `${c.presence.device} is away`;
@@ -151,6 +179,7 @@ export class Engine {
         else if (step.type === 'http') await this.#http(step, event);
         else if (step.type === 'ha') await this.#ha(step, event);
         else if (step.type === 'notify') await this.#notify(step, event);
+        else if (step.type === 'mode') this.#modeStep(step, routine);
         else if (LIGHT_STEPS.has(step.type)) {
           const live = stepTargets(step).filter((t) => !tokens.get(t)?.cancelled);
           await Promise.all(live.map((t) => this.#lightStep(step, t, tokens.get(t))));
@@ -209,6 +238,14 @@ export class Engine {
       await this.sendNtfy(step, event);
     } catch (err) {
       this.log.error(`Phone alert failed: ${err.message}`);
+    }
+  }
+
+  #modeStep(step, routine) {
+    try {
+      if (this.setMode(step.mode, routine.name, { byWorkflow: true })) this.log.info(`Mode → ${step.mode}`);
+    } catch (err) {
+      this.log.error(err.message);
     }
   }
 

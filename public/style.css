@@ -153,6 +153,9 @@ dialog::backdrop { background: #000a; }
 textarea { font: 0.88rem/1.4 ui-monospace, "Cascadia Code", Consolas, monospace; color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; width: 100%; resize: vertical; }
 .pill.user { cursor: pointer; color: var(--text); }
 .pill.user:hover { border-color: var(--muted); }
+.pill.mode { color: var(--text); gap: 4px; }
+.pill.mode select { background: transparent; border: 0; padding: 0 2px; color: inherit; font: inherit; cursor: pointer; }
+.pill.mode select option { background: var(--panel); }
 
 .idea { background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 14%, var(--panel)), var(--panel) 60%); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
 .idea-head { display: flex; gap: 12px; align-items: flex-start; margin-bottom: 12px; }

@@ -7,6 +7,7 @@ import { sunTimes, moonPhase, isFullMoon } from '../src/solar.js';
 import { Auth } from '../src/auth.js';
 import { handleMcp } from '../src/mcp.js';
 import { createTools, normalizeWorkflow } from '../src/tools.js';
+import { sleep } from '../src/util.js';
 import { Engine, matchesTrigger, template, ntfyRequest } from '../src/engine.js';
 import { nextFireToday, Scheduler } from '../src/scheduler.js';
 import { classify, vendorFor, pickName } from '../src/discovery.js';
@@ -206,4 +207,45 @@ test('or-triggers: any trigger starts the workflow, incl. scheduled ones', () =>
   assert.throws(() => wf({ orTriggers: [{ source: 'plex' }] }), /extra trigger/);
   assert.throws(() => wf({ orTriggers: 'nope' }), /list/);
   assert.equal(wf({ orTriggers: [] }).orTriggers, undefined);
+});
+
+test('house modes: set, trigger on change, condition, step, loop guard', async () => {
+  const { engine, config, tools } = fakeCtx();
+  Object.assign(config, { mode: 'home', modes: ['home', 'away', 'movie', 'sleep'] });
+  const fired = [];
+  const realFire = engine.fire.bind(engine);
+  engine.fire = (r, e) => (fired.push(`${r.id}:${e.from}->${e.to}`), realFire(r, e));
+  config.routines = [
+    { id: 'dim', enabled: true, name: 'Movie dims', trigger: { source: 'mode', event: 'mode.changed', to: 'movie' }, steps: [{ type: 'wait', ms: 0 }] },
+    { id: 'any', enabled: true, name: 'Any change', trigger: { source: 'mode', event: 'mode.changed' }, steps: [{ type: 'wait', ms: 0 }] },
+  ];
+  assert.equal(engine.setMode('Movie', 'test'), true);
+  assert.equal(config.mode, 'movie');
+  assert.equal(engine.setMode('movie'), false); // no change → no event
+  assert.throws(() => engine.setMode('disco'), /Unknown mode.*home, away/);
+  assert.deepEqual(fired, ['dim:home->movie', 'any:home->movie']);
+
+  assert.equal(engine.blockedBy({ conditions: { mode: 'movie' } }), null);
+  assert.match(engine.blockedBy({ conditions: { mode: ['sleep', 'away'] } }), /mode is movie/);
+
+  await engine.run({ id: 's', name: 'Bedtime', steps: [{ type: 'mode', mode: 'sleep' }] });
+  assert.equal(config.mode, 'sleep');
+
+  // two workflows that flip the mode back and forth get stopped
+  config.routines = [
+    { id: 'a', enabled: true, name: 'A', trigger: { source: 'mode', event: 'mode.changed', to: 'home' }, steps: [{ type: 'mode', mode: 'away' }] },
+    { id: 'b', enabled: true, name: 'B', trigger: { source: 'mode', event: 'mode.changed', to: 'away' }, steps: [{ type: 'mode', mode: 'home' }] },
+  ];
+  const errors = [];
+  engine.log.error = (m) => errors.push(m);
+  engine.setMode('home');
+  await sleep(50);
+  assert.ok(errors.some((m) => /back and forth/.test(m)), errors.join('\n'));
+
+  const set = tools.find((t) => t.name === 'set_mode');
+  config.mode = 'home';
+  assert.deepEqual(await tools.find((t) => t.name === 'get_mode').run({}), { mode: 'home', modes: config.modes });
+  assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'x', event: 'y' }, steps: [{ type: 'mode' }] }), /mode step/);
+  config.routines = [];
+  assert.deepEqual(await set.run({ mode: 'away' }), { ok: true, changed: true, mode: 'away' });
 });
