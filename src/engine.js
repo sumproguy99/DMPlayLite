@@ -16,6 +16,9 @@ import { isDark, isFullMoon } from './solar.js';
 
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
 export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
+export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device));
+// Condition groups that actually check something: "conditions" OR any of "orConditions".
+export const conditionGroups = (routine) => [routine.conditions, ...(routine.orConditions ?? [])].filter(hasConditions);
 
 export function matchesTrigger(trigger, event) {
   if (!trigger || trigger.source !== event.source || trigger.event !== event.type) return false;
@@ -135,9 +138,21 @@ export class Engine {
     return true;
   }
 
-  // Returns a reason string if a condition fails, else null.
+  // Returns a reason string if the conditions fail, else null.
+  // "conditions" and each "orConditions" group is an AND of its checks; any passing group lets the workflow run.
   blockedBy(routine, now = new Date()) {
-    const c = routine.conditions ?? {};
+    const groups = conditionGroups(routine);
+    if (!groups.length) return null;
+    const reasons = [];
+    for (const c of groups) {
+      const why = this.#groupBlockedBy(c, now);
+      if (!why) return null;
+      reasons.push(why);
+    }
+    return [...new Set(reasons)].join(' / ');
+  }
+
+  #groupBlockedBy(c, now) {
     if (!withinTimeWindow(c.timeWindow, now)) return `outside ${c.timeWindow.from}–${c.timeWindow.to}`;
     const loc = this.getConfig().location;
     if ((c.dark || c.light) && !loc?.lat) return 'set your location to use day/night conditions';

@@ -173,6 +173,7 @@ textarea { font: 0.88rem/1.4 ui-monospace, "Cascadia Code", Consolas, monospace;
 .block.if { border-color: color-mix(in srgb, var(--event) 45%, var(--border)); }
 .block.then { border-color: color-mix(in srgb, var(--accent) 45%, var(--border)); }
 .or-trigger { margin-top: 12px; padding: 12px; border-radius: 10px; border: 1px dashed color-mix(in srgb, var(--event) 45%, var(--border)); background: var(--panel-2); }
+.or-cond { margin-top: 12px; padding: 12px; border-radius: 10px; border: 1px dashed var(--border); background: var(--panel-2); }
 .tiles { display: grid; grid-template-columns: repeat(auto-fill, minmax(130px, 1fr)); gap: 8px; }
 .tile { display: grid; gap: 2px; justify-items: start; text-align: left; padding: 10px; border-radius: 10px; border: 1px solid var(--border); background: var(--panel-2); cursor: pointer; }
 .tile small { color: var(--muted); font-size: 0.76rem; }

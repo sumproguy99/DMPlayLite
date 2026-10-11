@@ -29,7 +29,7 @@ Environment: `PORT` (8787), `PLAYLITE_DATA` (config folder, `./data`), `ANTHROPI
 | Area | What it does |
 |---|---|
 | **Login** | Accounts with scrypt-hashed passwords, 30-day sessions, add family members under 👤 |
-| **Workflows** | IF/THEN builder with service tiles and "Or when…" extra triggers (any one starts it), *or* type the idea in plain English and AI drafts it for review |
+| **Workflows** | IF/THEN builder with service tiles and "Or when…" extra triggers (any one starts it) and "Or only if…" condition groups (checks in a group must all pass; any group passing is enough), *or* type the idea in plain English and AI drafts it for review |
 | **Network** | Always-on discovery (mDNS/Bonjour, SSDP/UPnP, ARP, subnet sweep every 10 min). Names & classifies phones, cameras, TVs, speakers, hubs; handles Wi-Fi extenders that share one MAC. Triggers: *device joins / leaves / new device* |
 | **Plex** | Play / pause / resume / stop / app opened — no Plex Pass needed (webhooks optional) |
 | **Lights** | Hue (native fades), Govee LAN (software fades), Home Assistant lights; mixed groups; new workflows take over lights mid-fade |

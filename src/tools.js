@@ -1,5 +1,6 @@
 // Tools that AI agents can use — shared by the MCP server (/mcp) and the built-in Claude assistant.
 import { randomId } from './util.js';
+import { hasConditions } from './engine.js';
 
 export const WORKFLOW_GUIDE = `A Playlite workflow is JSON:
 {
@@ -8,7 +9,8 @@ export const WORKFLOW_GUIDE = `A Playlite workflow is JSON:
   "voiceName": "Movie Mode",            // optional: exposes it to Alexa ("Alexa, turn on Movie Mode")
   "trigger": { "source": ..., "event": ..., ...filters },
   "orTriggers": [ { ... } ],             // optional: more triggers, same shape — any one of them starts the workflow
-  "conditions": { ... },                 // optional
+  "conditions": { ... },                 // optional: every check in it must pass
+  "orConditions": [ { ... } ],           // optional: alternative condition groups — the workflow runs if "conditions" OR any of these passes
   "cooldownSec": 0,                      // optional: minimum seconds between runs
   "targets": ["group:living-room"],      // default lights for light steps (ids from list_lights)
   "steps": [ ... ]
@@ -24,6 +26,8 @@ TRIGGERS (source → event → optional filters):
 - mode → mode.changed (the house mode was switched). Filters: to, from (mode names, see get_mode).
 CONDITIONS: timeWindow {"from":"HH:MM","to":"HH:MM"} · dark: true (after sunset/before sunrise) · light: true · fullMoon: true ·
   presence {"device": "iPhone", "state": "home"|"away"} · mode: "movie" or ["movie","sleep"] (current house mode is one of these).
+  Checks inside one group are AND. For OR use orConditions, e.g. "after dark OR in movie mode" →
+  "conditions": {"dark": true}, "orConditions": [{"mode": "movie"}].
 STEPS:
 - {"type":"set","brightness":0-100,"kelvin":2200-6500,"color":"#rrggbb","transitionMs":5000,"targets":[optional override]}  (brightness 0 = off; "natural light" ≈ 4000K, warm ≈ 2700K)
 - {"type":"pulse","levels":[100,70,100],"times":5,"stepMs":1000,"restore":true}
@@ -40,6 +44,11 @@ export function normalizeWorkflow(w) {
   if (w.orTriggers != null && !Array.isArray(w.orTriggers)) throw new Error('orTriggers must be a list of triggers');
   if (w.orTriggers?.some((t) => !t?.source || !t?.event)) throw new Error('Every extra trigger needs a source and an event');
   if (w.orTriggers && !w.orTriggers.length) delete w.orTriggers;
+  if (w.orConditions != null && !Array.isArray(w.orConditions)) throw new Error('orConditions must be a list of condition groups');
+  if (w.orConditions) {
+    w.orConditions = w.orConditions.filter(hasConditions);
+    if (!w.orConditions.length) delete w.orConditions;
+  }
   if (!Array.isArray(w.steps) || !w.steps.length) throw new Error('Workflow needs at least one step');
   for (const s of w.steps) {
     if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
@@ -105,7 +114,7 @@ export function createTools(ctx) {
       name: 'list_workflows',
       description: 'List all workflows (IF this THEN that rules) with their ids, triggers and whether they are enabled.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      run: async () => getConfig().routines.map((r) => ({ id: r.id, name: r.name, enabled: r.enabled, voiceName: r.voiceName, trigger: r.trigger, orTriggers: r.orTriggers, steps: r.steps.length })),
+      run: async () => getConfig().routines.map((r) => ({ id: r.id, name: r.name, enabled: r.enabled, voiceName: r.voiceName, trigger: r.trigger, orTriggers: r.orTriggers, conditions: r.conditions, orConditions: r.orConditions, steps: r.steps.length })),
     },
     {
       name: 'get_workflow',

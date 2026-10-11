@@ -203,17 +203,22 @@ function describeTrigger(tr) {
   return `<span class="src-icon">${src?.icon ?? '⚡'}</span> ${bits.join(' ')}`;
 }
 
-function describeConditions(r) {
-  const c = r.conditions ?? {};
+function describeConditionGroup(c = {}) {
   const out = [];
   if (c.timeWindow) out.push(`${c.timeWindow.from}–${c.timeWindow.to}`);
-  if (c.dark) out.push('when dark');
-  if (c.light) out.push('when light out');
+  if (c.dark) out.push("it's dark");
+  if (c.light) out.push("it's daytime");
   if (c.fullMoon) out.push('full moon');
   if (c.mode?.length) out.push(`mode is ${[c.mode].flat().join(' or ')}`);
   if (c.presence?.device) out.push(`${c.presence.device} is ${c.presence.state}`);
-  if (r.cooldownSec) out.push(`cooldown ${r.cooldownSec}s`);
-  return out.length ? `<div class="when muted">Only if ${out.map(esc).join(' · ')}</div>` : '';
+  return out.map(esc).join(' · ');
+}
+
+function describeConditions(r) {
+  const groups = [r.conditions, ...(r.orConditions ?? [])].map(describeConditionGroup).filter(Boolean);
+  const text = groups.join(' <span class="kw">OR</span> ');
+  const cool = r.cooldownSec ? `${text ? ' · ' : ''}cooldown ${r.cooldownSec}s` : '';
+  return text || cool ? `<div class="when muted">${text ? 'Only if ' : ''}${text}${cool}</div>` : '';
 }
 
 function renderRoutines() {
@@ -447,6 +452,29 @@ function stepEditor(step, i) {
     </div>`;
 }
 
+// One AND-group of conditions; base is "conditions" or "orConditions.<i>".
+function conditionFields(c = {}, base) {
+  return `
+        <div class="fields">
+          <label class="row small"><input type="checkbox" data-tw="${base}" ${c.timeWindow ? 'checked' : ''}> Between</label>
+          <input type="time" data-bind="${base}.timeWindow.from" value="${esc(c.timeWindow?.from ?? '17:00')}" ${c.timeWindow ? '' : 'disabled'}>
+          <span class="muted">and</span>
+          <input type="time" data-bind="${base}.timeWindow.to" value="${esc(c.timeWindow?.to ?? '06:00')}" ${c.timeWindow ? '' : 'disabled'}>
+        </div>
+        <div class="row small" style="margin-top:10px;gap:16px">
+          <label class="row"><input type="checkbox" data-bind="${base}.dark" data-type="flag" ${c.dark ? 'checked' : ''}> 🌙 It's dark out</label>
+          <label class="row"><input type="checkbox" data-bind="${base}.light" data-type="flag" ${c.light ? 'checked' : ''}> ☀️ It's daytime</label>
+          <label class="row"><input type="checkbox" data-bind="${base}.fullMoon" data-type="flag" ${c.fullMoon ? 'checked' : ''}> 🌕 Full moon</label>
+        </div>
+        <div class="fields" style="margin-top:10px">
+          <label class="field grow">Someone is…<input type="text" data-bind="${base}.presence.device" value="${esc(c.presence?.device)}" placeholder="device name, e.g. iPhone" list="netdevs2"></label>
+          <label class="field">&nbsp;<select data-bind="${base}.presence.state">${['home', 'away'].map((s) => `<option ${c.presence?.state === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+        </div>
+        <div class="row small" style="margin-top:10px">🎭 House mode is
+          ${S.state.modes.map((m) => `<label class="daychip"><input type="checkbox" data-list="${base}.mode" value="${esc(m)}" ${[c.mode].flat().includes(m) ? 'checked' : ''}><span>${esc(m)}</span></label>`).join('')}
+          <span class="muted">${c.mode?.length ? '' : '(any)'}</span></div>`;
+}
+
 function renderEditor() {
   const d = draft;
   const tr = d.trigger;
@@ -481,26 +509,18 @@ function renderEditor() {
 
       <div class="block">
         <div class="section-label">Only if <small class="muted">(optional)</small></div>
-        <div class="fields">
-          <label class="row small"><input type="checkbox" id="tw-on" ${c.timeWindow ? 'checked' : ''}> Between</label>
-          <input type="time" data-bind="conditions.timeWindow.from" value="${esc(c.timeWindow?.from ?? '17:00')}" ${c.timeWindow ? '' : 'disabled'}>
-          <span class="muted">and</span>
-          <input type="time" data-bind="conditions.timeWindow.to" value="${esc(c.timeWindow?.to ?? '06:00')}" ${c.timeWindow ? '' : 'disabled'}>
+        ${conditionFields(c, 'conditions')}
+        ${(d.orConditions ?? []).map((g, i) => `
+          <div class="or-cond">
+            <div class="row spread"><div class="row"><span class="kw">OR</span> <small class="muted">only if all of these</small></div>
+              <button class="btn sm ghost danger" data-delorc="${i}" title="Remove this group">✕</button></div>
+            ${conditionFields(g, `orConditions.${i}`)}
+          </div>`).join('')}
+        <div class="row" style="margin-top:10px">
+          <button class="btn sm" id="add-orc">+ Or only if…</button>
+          <label class="field row small" style="margin-left:auto">Cooldown (s)<input type="number" min="0" data-bind="cooldownSec" data-type="num" value="${d.cooldownSec ?? ''}" placeholder="none" style="width:90px"></label>
         </div>
-        <div class="row small" style="margin-top:10px;gap:16px">
-          <label class="row"><input type="checkbox" data-bind="conditions.dark" data-type="flag" ${c.dark ? 'checked' : ''}> 🌙 It's dark out</label>
-          <label class="row"><input type="checkbox" data-bind="conditions.light" data-type="flag" ${c.light ? 'checked' : ''}> ☀️ It's daytime</label>
-          <label class="row"><input type="checkbox" data-bind="conditions.fullMoon" data-type="flag" ${c.fullMoon ? 'checked' : ''}> 🌕 Full moon</label>
-        </div>
-        <div class="fields" style="margin-top:10px">
-          <label class="field grow">Someone is…<input type="text" data-bind="conditions.presence.device" value="${esc(c.presence?.device)}" placeholder="device name, e.g. iPhone" list="netdevs2"></label>
-          <datalist id="netdevs2">${[...new Set(S.network.filter((x) => ['phone', 'tablet', 'apple'].includes(x.kind)).map((x) => x.name).filter(Boolean))].map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
-          <label class="field">&nbsp;<select data-bind="conditions.presence.state">${['home', 'away'].map((s) => `<option ${c.presence?.state === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
-          <label class="field">Cooldown (s)<input type="number" min="0" data-bind="cooldownSec" data-type="num" value="${d.cooldownSec ?? ''}" placeholder="none"></label>
-        </div>
-        <div class="row small" style="margin-top:10px">🎭 House mode is
-          ${S.state.modes.map((m) => `<label class="daychip"><input type="checkbox" data-list="conditions.mode" value="${esc(m)}" ${[c.mode].flat().includes(m) ? 'checked' : ''}><span>${esc(m)}</span></label>`).join('')}
-          <span class="muted">${c.mode?.length ? '' : '(any)'}</span></div>
+        <datalist id="netdevs2">${[...new Set(S.network.filter((x) => ['phone', 'tablet', 'apple'].includes(x.kind)).map((x) => x.name).filter(Boolean))].map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
       </div>
 
       <div class="block then">
@@ -565,8 +585,12 @@ function wireEditor() {
     const evt = el.tagName === 'SELECT' || el.type === 'checkbox' ? 'change' : 'input';
     el.addEventListener(evt, () => {
       setPath(draft, el.dataset.bind, readInput(el));
-      if (el.dataset.bind.startsWith('conditions.presence') && !draft.conditions?.presence?.device) delete draft.conditions?.presence;
-      else if (el.dataset.bind === 'conditions.presence.device') draft.conditions.presence.state ??= 'home';
+      const pres = el.dataset.bind.match(/^(.*)\.presence\.(device|state)$/);
+      if (pres) {
+        const group = getPath(draft, pres[1]);
+        if (!group.presence?.device) delete group.presence;
+        else group.presence.state ??= 'home';
+      }
       if (el.hasAttribute('data-rerender')) renderEditor();
     });
     if (el.hasAttribute('data-rerender-blur')) el.addEventListener('change', renderEditor);
@@ -606,9 +630,10 @@ function wireEditor() {
       el.checked ? set.add(val) : set.delete(val);
       let next = [...set];
       if (path.endsWith('.days')) next = next.length === 7 ? undefined : next.sort();
-      if (path === 'conditions.mode') next = next.length ? next : undefined;
+      const isMode = /^(conditions|orConditions\.\d+)\.mode$/.test(path);
+      if (isMode) next = next.length ? next : undefined;
       setPath(draft, path, next);
-      if (path === 'conditions.mode') renderEditor();
+      if (isMode) renderEditor();
     };
   });
   dlg.querySelectorAll('[data-steptype]').forEach((el) => (el.onchange = () => {
@@ -646,11 +671,21 @@ function wireEditor() {
     draft.steps.splice(i + dir, 0, s);
     renderEditor();
   }));
-  $('#tw-on').onchange = (e) => {
-    if (e.target.checked) draft.conditions = { ...draft.conditions, timeWindow: { from: '17:00', to: '06:00' } };
-    else delete draft.conditions?.timeWindow;
+  dlg.querySelectorAll('[data-tw]').forEach((el) => (el.onchange = () => {
+    const path = el.dataset.tw;
+    if (el.checked) setPath(draft, `${path}.timeWindow`, { from: '17:00', to: '06:00' });
+    else delete getPath(draft, path)?.timeWindow;
+    renderEditor();
+  }));
+  $('#add-orc').onclick = () => {
+    (draft.orConditions ??= []).push({});
     renderEditor();
   };
+  dlg.querySelectorAll('[data-delorc]').forEach((el) => (el.onclick = () => {
+    draft.orConditions.splice(+el.dataset.delorc, 1);
+    if (!draft.orConditions.length) delete draft.orConditions;
+    renderEditor();
+  }));
   $('#cancel-edit').onclick = () => dlg.close();
   const validate = () => {
     if (!draft.name?.trim()) throw new Error('Give the workflow a name');

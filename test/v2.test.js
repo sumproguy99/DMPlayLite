@@ -249,3 +249,28 @@ test('house modes: set, trigger on change, condition, step, loop guard', async (
   config.routines = [];
   assert.deepEqual(await set.run({ mode: 'away' }), { ok: true, changed: true, mode: 'away' });
 });
+
+test('condition groups: conditions OR any orConditions group', () => {
+  const { engine, config } = fakeCtx();
+  Object.assign(config, { mode: 'home', modes: ['home', 'movie', 'sleep'], location: { lat: null, lon: null } });
+  const noon = new Date(2024, 5, 21, 12, 0);
+  const late = new Date(2024, 5, 21, 23, 0);
+  const r = {
+    conditions: { timeWindow: { from: '22:00', to: '06:00' } },
+    orConditions: [{ mode: 'movie' }, {}],
+  };
+  assert.match(engine.blockedBy(r, noon), /outside 22:00–06:00 \/ mode is home/);
+  assert.equal(engine.blockedBy(r, late), null); // first group passes
+  config.mode = 'movie';
+  assert.equal(engine.blockedBy(r, noon), null); // second group passes
+  // an empty main group doesn't make everything pass
+  config.mode = 'home';
+  assert.match(engine.blockedBy({ conditions: {}, orConditions: [{ mode: 'sleep' }] }, noon), /mode is home/);
+  assert.equal(engine.blockedBy({ conditions: {}, orConditions: [{}] }, noon), null);
+
+  const w = normalizeWorkflow({ name: 'a', trigger: { source: 'x', event: 'y' }, orConditions: [{}, { mode: [] }, { dark: true }], steps: [{ type: 'wait', ms: 0 }] });
+  assert.deepEqual(w.orConditions, [{ dark: true }]);
+  const w2 = normalizeWorkflow({ name: 'a', trigger: { source: 'x', event: 'y' }, orConditions: [{}], steps: [{ type: 'wait', ms: 0 }] });
+  assert.equal('orConditions' in w2, false);
+  assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'x', event: 'y' }, orConditions: { dark: true }, steps: [{ type: 'wait' }] }), /orConditions must be a list/);
+});
