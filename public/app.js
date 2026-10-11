@@ -170,6 +170,7 @@ async function refresh() {
   S.state = await api('GET', '/api/state');
   S.groups = S.state.groups;
   renderHeader();
+  renderHome();
   renderRoutines();
   renderConnections();
   renderActivity();
@@ -185,6 +186,164 @@ async function refreshNetwork() {
   const { devices } = await api('GET', '/api/network');
   S.network = devices;
   renderNetwork();
+}
+
+// ---------- home (phone-first quick screen) ----------
+const MODE_ICON = { home: '🏠', away: '🚗', movie: '🎬', sleep: '🌙', guest: '🛋', vacation: '🏖', party: '🎉' };
+const isStandalone = () => window.matchMedia?.('(display-mode: standalone)').matches || navigator.standalone === true;
+
+function renderHome() {
+  const el = $('#tab-home');
+  const st = S.state;
+  if (!el || !st) return;
+  const favs = st.routines.filter((r) => r.favorite);
+  const people = st.people ?? [];
+  const wx = st.weather;
+  const cams = st.frigate?.status?.connected ? st.frigate.cameras : [];
+  let hideInstall = false;
+  try {
+    hideInstall = localStorage.getItem('playlite.hideInstall') === '1';
+  } catch {
+    // storage unavailable
+  }
+  const ua = navigator.userAgent;
+  const howToInstall = /iPhone|iPad/.test(ua) ? 'In Safari tap <b>Share</b> → <b>Add to Home Screen</b>.' : /Android/.test(ua) ? 'In Chrome tap <b>⋮</b> → <b>Add to Home screen</b> (or <b>Install app</b>).' : 'In Chrome or Edge, use <b>Install</b> in the address bar or the ⋮ menu.';
+  el.innerHTML = `
+    <div class="home-screen">
+      ${!isStandalone() && !hideInstall ? `<div class="card install-hint"><div><b>📱 Put Playlite on your phone</b><br><span class="small muted">${howToInstall} It opens full-screen like an app. ${window.isSecureContext ? 'Then turn on app notifications under Connections → Playlite app.' : ''}</span></div><button class="btn sm ghost" id="hide-install" title="Hide">✕</button></div>` : ''}
+      <div class="card">
+        <div class="section-label">House mode</div>
+        <div class="mode-grid">${st.modes.map((m) => `<button class="mode-btn ${m === st.mode ? 'on' : ''}" data-hmode="${esc(m)}"><span>${MODE_ICON[m] ?? '🏷'}</span>${esc(m)}</button>`).join('')}</div>
+      </div>
+      ${people.length ? `<div class="card">
+        <div class="section-label">Who's home</div>
+        <div class="people-row">${people.map((p) => `<span class="person-chip ${p.state === 'home' ? 'home' : ''}" title="${p.by ? `by ${esc(p.by)}` : ''}">${p.state === 'home' ? '🏠' : '🚶'} ${esc(p.name)}<small>${p.since ? ago(p.since) : ''}</small></span>`).join('')}</div>
+      </div>` : ''}
+      ${wx?.enabled && wx.current ? `<div class="card">
+        <div class="section-label">Weather</div>
+        <div class="sky"><span>${SKY_ICON[wx.current.condition] ?? ''} ${esc(wx.current.condition)}</span><span>🌡 ${wx.current.temperature}${unitOf('temperature')}</span><span>↕ ${wx.current.low}–${wx.current.high}${unitOf('temperature')}</span><span>💨 ${wx.current.wind}${unitOf('wind')}</span></div>
+        ${(wx.alerts ?? []).map((a) => `<div class="note" style="border-color:var(--bad);margin-top:8px">⚠️ <b>${esc(a.alert)}</b>${a.expires ? ` <span class="small muted">until ${timeOf(a.expires)}</span>` : ''}</div>`).join('')}
+      </div>` : ''}
+      <div class="card">
+        <div class="section-label">Quick buttons</div>
+        ${favs.length || st.scenes.length ? `<div class="quick-grid">
+          ${favs.map((r) => `<button class="quick" data-hrun="${esc(r.id)}"><span>⚡</span>${esc(r.voiceName || r.name)}</button>`).join('')}
+          ${st.scenes.map((x) => `<button class="quick scene" data-hscene="${esc(x.id)}"><span>🎬</span>${esc(x.name)}</button>`).join('')}
+        </div>` : ''}
+        <p class="small muted" style="margin:${favs.length || st.scenes.length ? '10px' : '0'} 0 0">${favs.length ? '' : 'Tap ☆ on a workflow to put a button for it here. '}${st.scenes.length ? '' : 'Saved scenes (Lights tab) show up here too.'}</p>
+      </div>
+      ${st.waiting?.length ? `<div class="card"><div class="section-label">Waiting</div>${st.waiting.map((w) => `<div class="small">⏳ ${esc(w.name)} — if it stays that way ${w.forMin} min${w.subject ? ` (${esc(w.subject)})` : ''}</div>`).join('')}</div>` : ''}
+      ${cams.length ? `<div class="card">
+        <div class="row spread"><div class="section-label">Cameras</div><button class="btn sm ghost" id="cams-refresh">↻</button></div>
+        <div class="cam-grid">${cams.map((c) => `<figure><img loading="lazy" alt="${esc(c.name)}" data-cam="${esc(c.name)}" src="/api/frigate/snapshot?camera=${encodeURIComponent(c.name)}&t=${Math.floor(Date.now() / 30000)}"><figcaption class="small">${esc(c.name)}</figcaption></figure>`).join('')}</div>
+      </div>` : ''}
+    </div>`;
+  el.querySelectorAll('[data-hmode]').forEach((b) => (b.onclick = guard(async () => {
+    await api('POST', '/api/mode', { mode: b.dataset.hmode });
+    S.state.mode = b.dataset.hmode;
+    renderHome();
+    renderHeader();
+  })));
+  el.querySelectorAll('[data-hrun]').forEach((b) => (b.onclick = guard(async () => {
+    await api('POST', '/api/routines/run', { id: b.dataset.hrun });
+    toast(`Running ${b.textContent.trim().replace(/^⚡/, '')}`);
+  })));
+  el.querySelectorAll('[data-hscene]').forEach((b) => (b.onclick = guard(async () => {
+    await api('POST', '/api/scenes/apply', { id: b.dataset.hscene, transitionMs: 1000 });
+    toast(`Scene: ${b.textContent.trim().replace(/^🎬/, '')}`);
+  })));
+  $('#hide-install')?.addEventListener('click', () => {
+    try {
+      localStorage.setItem('playlite.hideInstall', '1');
+    } catch {
+      // storage unavailable
+    }
+    renderHome();
+  });
+  $('#cams-refresh')?.addEventListener('click', () => el.querySelectorAll('[data-cam]').forEach((img) => (img.src = `/api/frigate/snapshot?camera=${encodeURIComponent(img.dataset.cam)}&t=${Date.now()}`)));
+}
+
+// ---------- app notifications (Web Push) ----------
+const pushSupported = () => window.isSecureContext && 'serviceWorker' in navigator && 'PushManager' in window && 'Notification' in window;
+
+async function pushSubscription() {
+  if (!pushSupported()) return null;
+  const reg = await navigator.serviceWorker.getRegistration();
+  return reg ? reg.pushManager.getSubscription() : null;
+}
+
+// Does Playlite still have this browser's subscription? (it may have been removed from the list, or the data reset)
+async function pushRegistered(sub) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(sub.endpoint));
+  const hash = [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 16);
+  return (S.state.push?.devices ?? []).some((d) => d.hash === hash);
+}
+
+async function enablePush() {
+  if (Notification.permission === 'denied') throw new Error('Notifications are blocked for Playlite — allow them in the browser / phone settings');
+  if ((await Notification.requestPermission()) !== 'granted') throw new Error('Notifications were not allowed');
+  const reg = await navigator.serviceWorker.register('/sw.js');
+  await navigator.serviceWorker.ready;
+  const { publicKey } = await api('GET', '/api/push/key');
+  const key = Uint8Array.from(atob(publicKey.replace(/-/g, '+').replace(/_/g, '/')), (c) => c.charCodeAt(0));
+  const sub = (await reg.pushManager.getSubscription()) ?? (await reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey: key }));
+  const ua = navigator.userAgent;
+  const device = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? 'Android' : /Mac/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows PC' : 'Browser';
+  await api('POST', '/api/push/subscribe', { subscription: sub.toJSON(), device });
+}
+
+async function disablePush() {
+  const sub = await pushSubscription();
+  if (sub) {
+    await api('POST', '/api/push/unsubscribe', { endpoint: sub.endpoint });
+    await sub.unsubscribe();
+  }
+}
+
+function appCard() {
+  const devices = S.state.push?.devices ?? [];
+  const secure = window.isSecureContext;
+  return `<div class="card stack">
+      <div class="row spread"><h2>📱 Playlite app</h2>${statusPill(devices.length > 0, devices.length ? `${devices.length} device${devices.length === 1 ? ' gets' : 's get'} alerts` : 'No app alerts yet')}</div>
+      <p class="small muted" style="margin:0">Add Playlite to your phone's Home Screen (iPhone: Safari → Share → Add to Home Screen; Android: Chrome → ⋮ → Add to Home screen). Then turn on notifications here, and every “📲 Phone alert” also arrives as an app notification — no ntfy needed.</p>
+      ${secure
+        ? `<div class="row" style="gap:8px;flex-wrap:wrap"><button class="btn primary" id="push-on" ${pushSupported() ? '' : 'disabled'}>Turn on notifications on this device</button><button class="btn" id="push-off" hidden>Turn off on this device</button><button class="btn" id="push-test" ${devices.length ? '' : 'disabled'}>Send test</button></div>
+           ${pushSupported() ? '' : `<p class="small" style="color:var(--warn);margin:0">${/iPhone|iPad/.test(navigator.userAgent) && !isStandalone() ? 'On iPhone, add Playlite to the Home Screen first and open it from there — then this button works.' : 'This browser can’t receive web notifications.'}</p>`}`
+        : `<p class="small" style="color:var(--warn);margin:0">App notifications and offline use need a secure (HTTPS) address — browsers don't allow them on <code>http://${esc(location.host)}</code>. The easy way: install <b>Tailscale</b> on this PC and your phone, run <code>tailscale serve --bg ${esc(location.port || '80')}</code> on this PC, and open the <code>https://…ts.net</code> address it prints (works away from home too). A reverse proxy with a certificate (Caddy, Nginx Proxy Manager) works as well. Until then, the Home Screen shortcut still works and ntfy handles alerts.</p>`}
+      ${devices.length ? `<div class="small">${devices.map((d) => `<div class="row spread" style="padding:3px 0"><span>${esc(d.device)} <span class="muted">· ${esc(d.user ?? '')} · since ${new Date(d.since).toLocaleDateString()}</span></span><button class="btn sm ghost danger" data-pushdel="${esc(d.id)}">Remove</button></div>`).join('')}</div>` : ''}
+    </div>`;
+}
+
+function wireAppCard(el) {
+  const on = el.querySelector('#push-on');
+  const off = el.querySelector('#push-off');
+  if (on && pushSupported()) {
+    pushSubscription().then(async (sub) => {
+      if (!sub || !(await pushRegistered(sub))) return;
+      on.textContent = 'Notifications are on for this device';
+      on.disabled = true;
+      off.hidden = false;
+    }).catch(() => {});
+    on.onclick = guard(async (e) => busy(e.target, 'Asking…', async () => {
+      await enablePush();
+      toast('App notifications are on for this device');
+      await refresh();
+    }));
+    off.onclick = guard(async () => {
+      await disablePush();
+      toast('App notifications are off for this device');
+      await refresh();
+    });
+  }
+  const test = el.querySelector('#push-test');
+  if (test) test.onclick = guard(async (e) => busy(e.target, 'Sending…', async () => {
+    const r = await api('POST', '/api/push/test');
+    toast(`Test sent to ${r.sent} device${r.sent === 1 ? '' : 's'}`);
+  }));
+  el.querySelectorAll('[data-pushdel]').forEach((b) => (b.onclick = guard(async () => {
+    await api('POST', '/api/push/unsubscribe', { id: b.dataset.pushdel });
+    await refresh();
+  })));
 }
 
 // ---------- header ----------
@@ -313,6 +472,7 @@ function renderRoutines() {
               ${(S.state.waiting ?? []).filter((w) => w.name === r.name).map((w) => `<span class="chip" title="Runs if it stays that way">⏳ waiting ${w.forMin} min${w.subject ? ` · ${esc(w.subject)}` : ''}</span>`).join('')}
             </div>
             <div class="row">
+              <button class="btn sm ghost star ${r.favorite ? 'on' : ''}" data-fav="${i}" title="${r.favorite ? 'On the Home screen — tap to remove' : 'Put a button for this on the Home screen'}">${r.favorite ? '★' : '☆'}</button>
               <button class="btn sm" data-run="${esc(r.id)}">Run now</button>
               <button class="btn sm" data-edit="${i}">Edit</button>
             </div>
@@ -342,6 +502,14 @@ function renderRoutines() {
   el.querySelectorAll('[data-run]').forEach((b) => (b.onclick = guard(async () => {
     await api('POST', '/api/routines/run', { id: b.dataset.run });
     toast('Running…');
+  })));
+  el.querySelectorAll('[data-fav]').forEach((b) => (b.onclick = guard(async () => {
+    const routines = structuredClone(S.state.routines);
+    const r = routines[+b.dataset.fav];
+    if (r.favorite) delete r.favorite;
+    else r.favorite = true;
+    await saveRoutines(routines);
+    toast(r.favorite ? 'Added to Home' : 'Removed from Home');
   })));
   el.querySelectorAll('[data-toggle]').forEach((c) => (c.onchange = guard(async () => {
     const routines = clone(S.state.routines);
@@ -642,7 +810,7 @@ function stepEditor(step, i) {
         ${step.snapshot != null && step.snapshot !== false ? `<label class="field grow">From <small>(camera name or snapshot URL)</small><input type="text" data-bind="${p}.snapshot" value="${esc(step.snapshot === true ? '' : step.snapshot)}" placeholder="the camera that triggered it" list="cameras2"></label>
         <datalist id="cameras2">${(S.state.frigate?.cameras ?? []).map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>` : ''}
       </div>
-      <p class="muted small" style="margin:0">Use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} to insert details from the trigger.${topicSet ? '' : ' <span style="color:var(--warn)">Set up Phone alerts under Connections first.</span>'}</p>`;
+      <p class="muted small" style="margin:0">Goes to ntfy and to phones with Playlite app notifications on. Use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} to insert details from the trigger.${topicSet || S.state.push?.devices?.length ? '' : ' <span style="color:var(--warn)">Set up Phone alerts or the Playlite app under Connections first.</span>'}</p>`;
   }
   const custom = ['set', 'pulse', 'capture'].includes(step.type) && step.targets?.length;
   return `
@@ -1428,6 +1596,8 @@ function renderConnections() {
         <details><summary class="small muted">Topic prefix</summary><div class="fields" style="margin-top:8px"><label class="field">Frigate MQTT topic prefix<input type="text" id="fr-prefix" value="${esc(fr.topicPrefix)}" placeholder="frigate"></label></div></details>
       </div>
 
+      ${appCard()}
+
       <div class="card stack">
         <div class="row spread"><h2>📲 Phone alerts</h2>${statusPill(Boolean(ntfy.topic), ntfy.topic ? 'Ready' : 'Not set up')}</div>
         <p class="small muted" style="margin:0">Uses <b>ntfy</b> — free, no account. Install the ntfy app (iPhone or Android), tap <b>+</b>, and subscribe to the same topic name you enter here. Then add a “📲 Phone alert” step to any workflow.</p>
@@ -1559,6 +1729,7 @@ function renderConnections() {
     S.mqttTopics = null;
     setTimeout(refresh, 600);
   }));
+  wireAppCard($('#tab-connections'));
   $('#fr-save').onclick = guard(async (e) => busy(e.target, 'Connecting…', async () => {
     const body = { url: $('#fr-url').value.trim(), username: $('#fr-user').value.trim(), topicPrefix: $('#fr-prefix').value.trim() };
     if ($('#fr-pass').value) body.password = $('#fr-pass').value;
@@ -1736,7 +1907,12 @@ function showTab(name) {
 }
 document.querySelectorAll('.tabs button').forEach((b) => (b.onclick = () => showTab(b.dataset.tab)));
 
-await refresh().catch((e) => toast(e.message, true));
+await refresh().catch((e) => {
+  // opened from the saved copy (or the PC is off): say so instead of a blank screen
+  $('#tab-home').innerHTML = `<div class="home-screen"><div class="card stack"><h2>Playlite is out of reach</h2><p class="muted" style="margin:0">${navigator.onLine ? `It didn't answer (${esc(e.message)}). Is the PC running, and are you on your home Wi-Fi or VPN?` : 'This phone is offline.'}</p><button class="btn primary" id="retry">Try again</button></div></div>`;
+  $('#retry').onclick = () => location.reload();
+  S.offline = true;
+});
 refreshLights().catch(() => {});
 refreshNetwork().catch(() => {});
 let saved = null;
@@ -1745,12 +1921,21 @@ try {
 } catch {
   // storage unavailable
 }
-if (saved && saved !== 'routines' && document.getElementById(`tab-${saved}`)) showTab(saved);
+if (saved && saved !== 'home' && !S.offline && document.getElementById(`tab-${saved}`)) showTab(saved);
+// offline start-up and app notifications (browsers only allow service workers on HTTPS / localhost)
+if (window.isSecureContext && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+  // an app notification while Playlite is open: show it here too
+  navigator.serviceWorker.addEventListener('message', (e) => {
+    if (e.data?.type === 'push') toast(`📲 ${[e.data.msg.title, e.data.msg.message].filter(Boolean).join(': ')}`);
+  });
+}
 
 setInterval(() => api('GET', '/api/state').then((s) => {
   const waitingChanged = JSON.stringify(s.waiting) !== JSON.stringify(S.state.waiting);
-  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky, weather: s.weather, frigate: s.frigate, people: s.people });
+  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky, weather: s.weather, frigate: s.frigate, people: s.people, push: s.push });
   renderHeader();
+  if ($('#tab-home').classList.contains('active')) renderHome();
   if (waitingChanged && !$('#idea')?.value) renderRoutines(); // don't wipe an idea being typed
 }).catch(() => {}), 10_000);
 setInterval(() => {

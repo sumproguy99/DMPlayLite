@@ -40,7 +40,7 @@ STEPS:
 - {"type":"pulse","levels":[100,70,100],"times":5,"stepMs":1000,"restore":true}
 - {"type":"wait","ms":2000}
 - {"type":"http","method":"POST","url":"https://…","body":{…}}   (strings may use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} from the event)
-- {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy; optional "topic" overrides the default set under Connections; priority 1-5, 5 = urgent)
+- {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy and to phones with Playlite app notifications on; optional "topic" overrides the ntfy topic; priority 1-5, 5 = urgent)
   Add "snapshot": "" to attach the picture from the camera that triggered the workflow, "snapshot": "driveway" for that Frigate camera's
   live frame, or "snapshot": "http://user:pass@192.168.1.50/snap.jpg" for any camera's snapshot URL. Doorbell press → snapshot of the porch.
 - {"type":"mode","mode":"movie"}   (switch the house mode; this can trigger other workflows)

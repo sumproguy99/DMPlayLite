@@ -15,9 +15,10 @@ import { HttpError, readBody, readJson, send } from './http-utils.js';
 export { lanAddresses };
 
 const PUBLIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public');
-const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json' };
+const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8', '.svg': 'image/svg+xml', '.json': 'application/json', '.webmanifest': 'application/manifest+json', '.png': 'image/png' };
 // Reachable without logging in (the login page itself, and machine endpoints guarded by the key).
-const OPEN_FILES = new Set(['/login.html', '/style.css', '/favicon.svg']);
+// The app shell (manifest, icons, service worker) is open too so phones can install Playlite from the login page.
+const OPEN_FILES = new Set(['/login.html', '/style.css', '/favicon.svg', '/manifest.webmanifest', '/sw.js', '/icon.svg', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png']);
 
 export function createServer(app) {
   const { config, lights, engine, log, port, discovery, services, assistant, tools, scheduler, auth } = app;

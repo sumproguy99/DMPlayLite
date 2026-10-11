@@ -132,7 +132,7 @@ heading home → pre-warm the house.
 | iPhone **Focus modes** (Sleep/Work) → webhook | Shortcuts automation | 🟢 (works today) |
 | iPhone alarm stopped → sunrise lights | Shortcuts "When alarm is stopped" | 🟢 (works today) |
 | Android: phone charging at night = going to bed | Tasker | 🟢 |
-| Installable **mobile app (PWA)** with big routine buttons + home-screen widget | add manifest + service worker | 🟡 |
+| ✅ Installable **mobile app (PWA)** with big routine buttons, offline start-up and push notifications · home-screen widget still to do | manifest + service worker + Web Push | 🟡 |
 
 ## 8. Home assistants & ecosystems
 
@@ -245,6 +245,6 @@ Ideas: person in driveway after dark → porch lights 100% for 5 min · package 
 11. ✅ Cameras: Frigate detections + snapshots in phone alerts (ONVIF / UniFi Protect / Reolink events still to do)
 
 **Phase 4 — Polish & voice**
-12. PWA mobile app with widgets
+12. ✅ PWA phone app: Home tab (modes, favorites, scenes, people, weather, cameras), offline start-up, Web Push notifications · widgets still to do
 13. Emulated Hue (Alexa/Google) + HomeKit (Siri)
 14. AI routine builder, PC agent, Gmail/Calendar, thermostats

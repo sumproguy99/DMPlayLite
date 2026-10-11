@@ -48,6 +48,7 @@ Environment: `PORT` (8787), `PLAYLITE_DATA` (config folder, `./data`), `ANTHROPI
 | **AI agents** | MCP server at `/mcp` (Claude Code: `claude mcp add --transport http playlite "<url>"`) with tools for lights, workflows, network, Home Assistant |
 | **House modes** | home / away / movie / sleep / guest — switch from the header, a workflow step, Siri (`/mode/<name>`) or the AI; "mode changes" trigger and "only if mode is…" condition |
 | **Scenes** | Save how lights look (brightness + white or color) under a name on the Lights tab, then restore with a tap, a "🎬 Scene" step, Siri (`/scene/<name>`) or the AI. A "📸 Save scene" step captures the room mid-workflow — e.g. remember it when a movie starts, put it back when it stops |
+| **Phone app** | Add Playlite to your Home Screen: a **Home** tab with big buttons for the house mode, ★ favorite workflows and scenes, who's home, weather and cameras. On a secure (HTTPS) address it also opens offline and gets **app notifications** — every phone alert arrives as a real push notification, no ntfy needed (see below) |
 | **Phone alerts** | "📲 Phone alert" step pushes to the ntfy app (iOS/Android) — title, priority, emoji tags, tap-to-open link, `{{variables}}`; public ntfy.sh or self-hosted with an access token |
 | **MQTT** | Built-in client (no extra installs): any broker message is a trigger — match the topic (`+`/`#` wildcards) and the whole message or one JSON field that *changes* (Zigbee2MQTT motion/doors/buttons, Tasmota, ESPHome, Frigate, rtl_433, OwnTracks); "📡 MQTT message" step publishes commands. Works with "for N minutes" (no motion for 10 min) |
 | **Web** | Inbound `/hooks/<name>` (IFTTT, Zapier, Tasker, HA `rest_command`); outbound "Call a URL" step with `{{variables}}` |
@@ -66,11 +67,24 @@ groups and workflows you've given a voice name.
 | `src/scheduler.js`, `src/solar.js` | time/sun triggers, sun & moon math |
 | `src/auth.js` | accounts & sessions |
 | `src/tools.js`, `src/mcp.js`, `src/agent.js` | AI tools, MCP server, Claude assistant |
+| `src/webpush.js` | Web Push (VAPID + RFC 8291 encryption) for app notifications |
 | `src/plugins/` | one file per integration: its settings, triggers, conditions, steps, AI tools, API routes (see below) |
 | `src/integrations/`, `src/presence.js` | the device / service code the plugins use: plex, hue, huesensors, govee, wled, homeassistant, alexa, mqtt, roku, weather, frigate |
-| `public/` | UI (plain HTML/JS) |
+| `public/` | UI (plain HTML/JS), app manifest, icons, service worker (`sw.js`) |
 | `INTEGRATIONS.md` | research: smart-home platforms, top HA integrations, brands |
 | `ROADMAP.md` | what's next |
+
+## Phone app & notifications
+
+Open Playlite on your phone and add it to the Home Screen (iPhone: Safari → Share → Add to Home Screen; Android: Chrome →
+⋮ → Add to Home screen). It opens full-screen on the **Home** tab; tap ☆ on a workflow to give it a button there.
+
+App notifications (and opening offline) need Playlite on an **HTTPS** address — browsers don't allow them on plain
+`http://192.168.x.x`. The simplest way is [Tailscale](https://tailscale.com): install it on the PC and your phone, run
+`tailscale serve --bg 8787` on the PC, and use the `https://<pc>.<tailnet>.ts.net` address it prints (it works away from home
+too). A reverse proxy with a certificate (Caddy, Nginx Proxy Manager) works as well. Then, in the app, Connections →
+**Playlite app** → *Turn on notifications on this device*. On iPhone this works from the Home Screen app (iOS 16.4+).
+Notifications are end-to-end encrypted to each device (Web Push); Playlite needs no account with Apple or Google.
 
 ## Adding an integration
 

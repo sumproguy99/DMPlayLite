@@ -23,6 +23,9 @@ import { Frigate } from '../src/integrations/frigate.js';
 import { Presence, distanceM } from '../src/presence.js';
 import { PLUGINS, pluginDefaults, pluginStepTypes } from '../src/plugins/index.js';
 import { WORKFLOW_GUIDE } from '../src/tools.js';
+import { encrypt, vapidAuth, generateVapidKeys, sendPush, b64u } from '../src/webpush.js';
+import pushPlugin from '../src/plugins/push.js';
+import crypto from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 
@@ -973,4 +976,99 @@ test('plugins: well-formed, unique, and wired into the guide, steps and tools', 
   const names = tools.map((t) => t.name);
   assert.equal(new Set(names).size, names.length);
   for (const n of ['plex_control', 'roku', 'mqtt_publish', 'get_weather', 'camera_snapshot', 'list_people', 'home_assistant_call', 'list_hue_sensors']) assert.ok(names.includes(n), n);
+});
+
+// What a browser does with a push message: undo RFC 8291 with its own private key and auth secret.
+function decryptPush(body, ua) {
+  const salt = body.subarray(0, 16);
+  const idlen = body[20];
+  const asPublic = body.subarray(21, 21 + idlen);
+  const h = (k, d) => crypto.createHmac('sha256', k).update(d).digest();
+  const prkKey = h(ua.auth, ua.ecdh.computeSecret(asPublic));
+  const ikm = h(prkKey, Buffer.concat([Buffer.from('WebPush: info\0'), ua.ecdh.getPublicKey(), asPublic, Buffer.from([1])]));
+  const prk = h(salt, ikm);
+  const cek = h(prk, Buffer.from('Content-Encoding: aes128gcm\0\x01')).subarray(0, 16);
+  const nonce = h(prk, Buffer.from('Content-Encoding: nonce\0\x01')).subarray(0, 12);
+  const data = body.subarray(21 + idlen);
+  const d = crypto.createDecipheriv('aes-128-gcm', cek, nonce);
+  d.setAuthTag(data.subarray(-16));
+  const plain = Buffer.concat([d.update(data.subarray(0, -16)), d.final()]);
+  return plain.subarray(0, plain.lastIndexOf(2)).toString();
+}
+
+test('app notifications: RFC 8291 vector, VAPID, push service round trip, gone devices, phone alerts fan out', async (t) => {
+  // RFC 8291 Appendix A, byte for byte
+  const vector = encrypt('When I grow up, I want to be a watermelon', {
+    p256dh: 'BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4',
+    auth: 'BTBZMqHH6r4Tts7J_aSIgg',
+  }, { salt: b64u.dec('DGv6ra1nlYgDCS1FRnbzlw'), serverKey: 'yfWPiYE-n46HLnH0KqZOF1fJJU3MYrct3AELtAQ-oRw' });
+  assert.equal(b64u.enc(vector), 'DGv6ra1nlYgDCS1FRnbzlwAAEABBBP4z9KsN6nGRTbVYI_c7VJSPQTBtkgcy27mlmlMoZIIgDll6e3vCYLocInmYWAmS6TlzAC8wEqKK6PBru3jl7A_yl95bQpu6cVPTpK4Mqgkf1CXztLVBSt2Ks3oZwbuwXPXLWyouBWLVWGNWQexSgSxsj_Qulcy4a-fN');
+
+  // VAPID: an ES256 JWT for the push service's origin, verifiable with the public key the browser was given
+  const vapid = generateVapidKeys();
+  assert.equal(b64u.dec(vapid.publicKey).length, 65);
+  const auth = vapidAuth('https://fcm.googleapis.com/fcm/send/abc', vapid, 'https://example.com', Date.parse('2026-01-01T00:00:00Z'));
+  const [, jwt, k] = /^vapid t=([^,]+), k=(.+)$/.exec(auth);
+  assert.equal(k, vapid.publicKey);
+  const [h, c, sig] = jwt.split('.');
+  const claims = JSON.parse(b64u.dec(c));
+  assert.deepEqual(claims, { aud: 'https://fcm.googleapis.com', exp: Date.parse('2026-01-01T12:00:00Z') / 1000, sub: 'https://example.com' });
+  const pub = crypto.createPublicKey({ key: { kty: 'EC', crv: 'P-256', x: vapid.privateKey.x, y: vapid.privateKey.y }, format: 'jwk' });
+  assert.ok(crypto.verify('sha256', Buffer.from(`${h}.${c}`), { key: pub, dsaEncoding: 'ieee-p1363' }, b64u.dec(sig)));
+
+  // a fake push service: checks the headers, decrypts like a browser, says "gone" for one device
+  const got = [];
+  const server = await listen(async (req, res) => {
+    const chunks = [];
+    for await (const ch of req) chunks.push(ch);
+    got.push({ path: req.url, headers: req.headers, body: Buffer.concat(chunks) });
+    res.writeHead(req.url === '/gone' ? 410 : 201).end();
+  });
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const phone = (() => {
+    const ecdh = crypto.createECDH('prime256v1');
+    ecdh.generateKeys();
+    return { ecdh, auth: crypto.randomBytes(16) };
+  })();
+  const keys = { p256dh: b64u.enc(phone.ecdh.getPublicKey()), auth: b64u.enc(phone.auth) };
+  const r = await sendPush({ endpoint: `${base}/phone`, keys }, { title: 'Hi', message: 'ünïcode ✓' }, { vapid, subject: 'https://example.com', urgency: 'high' });
+  assert.equal(r.ok, true);
+  assert.equal(got[0].headers['content-encoding'], 'aes128gcm');
+  assert.equal(got[0].headers.urgency, 'high');
+  assert.equal(got[0].headers.ttl, '86400');
+  assert.match(got[0].headers.authorization, /^vapid t=.+, k=/);
+  assert.deepEqual(JSON.parse(decryptPush(got[0].body, phone)), { title: 'Hi', message: 'ünïcode ✓' });
+
+  // the plugin: keys made once and kept, subscriptions checked, gone devices dropped
+  const config = { routines: [], groups: [], ntfy: {}, push: { vapid: null, subscriptions: [] } };
+  const log = { lines: [], info(m) { this.lines.push(m); }, warn(m) { this.lines.push(m); }, error(m) { this.lines.push(`ERROR ${m}`); }, event() {} };
+  const push = pushPlugin.create({ getConfig: () => config, updateConfig: (fn) => fn(config), log });
+  const key1 = push.vapid.publicKey;
+  assert.equal(push.vapid.publicKey, key1);
+  assert.throws(() => push.subscribe({ endpoint: 'http://evil.example/x', keys }, { device: 'x' }), /valid push subscription/);
+  assert.throws(() => push.subscribe({ endpoint: 'https://fcm.googleapis.com/x' }, { device: 'x' }), /valid push subscription/);
+  push.subscribe({ endpoint: 'https://fcm.googleapis.com/x', keys }, { device: 'Pixel', user: 'sam' });
+  push.subscribe({ endpoint: 'https://fcm.googleapis.com/x', keys }, { device: 'Pixel again', user: 'sam' }); // same browser: replaced
+  assert.equal(config.push.subscriptions.length, 1);
+  // point the saved devices at the fake service (real ones are always https)
+  config.push.subscriptions = [{ id: 'a', endpoint: `${base}/phone`, keys, device: 'iPhone' }, { id: 'b', endpoint: `${base}/gone`, keys, device: 'Old tablet' }];
+  got.length = 0;
+
+  // a phone alert with no ntfy topic goes to the app devices
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, services: { push } });
+  config.routines = [{ id: 'n', enabled: true, name: 'Doorbell', trigger: { source: 'webhook', event: 'doorbell' }, steps: [{ type: 'notify', title: 'Door', message: 'Ding {{who}}', priority: 5 }] }];
+  await engine.run(config.routines[0], { source: 'webhook', type: 'doorbell', who: 'dong' });
+  assert.equal(got.length, 2);
+  assert.deepEqual(JSON.parse(decryptPush(got.find((g) => g.path === '/phone').body, phone)), { title: 'Door', message: 'Ding dong', priority: 5, tags: '', click: '' });
+  assert.equal(got[0].headers.urgency, 'high');
+  assert.deepEqual(config.push.subscriptions.map((x) => x.device), ['iPhone']); // 410 → removed
+  assert.ok(log.lines.includes('App alert sent to 1 device'), log.lines.join('\n'));
+
+  // nothing set up at all: a clear error, nothing sent
+  config.push.subscriptions = [];
+  got.length = 0;
+  await engine.run(config.routines[0], { source: 'webhook', type: 'doorbell' });
+  assert.equal(got.length, 0);
+  assert.match(log.lines.at(-2) ?? '', /no phone alerts set up/);
 });

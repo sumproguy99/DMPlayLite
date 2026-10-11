@@ -14,6 +14,7 @@
 //   condition       { has(c), check(c, svc, engine) → reason it fails | null, validate?(c) } for a key inside condition groups
 //   steps           { <type>: { run(step, event, { service, engine, log }), validate?(step), label?(step) } }
 //   snapshot(svc, spec, event)   → { data, name } — pictures for phone alerts
+//   notifier        { ready(svc), send(svc, { title, message, priority, tags, click }) → devices reached } — every phone alert goes here too
 //   guide           { triggers?, conditions?, steps? } — text for the AI's WORKFLOW_GUIDE
 //   tools(svc, ctx) → AI / MCP tools
 //   state(svc, ctx) → keys merged into GET /api/state (ctx: { config, discovery })
@@ -29,15 +30,17 @@ import roku from './roku.js';
 import weather from './weather.js';
 import frigate from './frigate.js';
 import presence from './presence.js';
+import push from './push.js';
 import alexa from './alexa.js';
 
 // Order matters only for create(): a plugin can use the services of plugins listed before it.
-export const PLUGINS = [hue, govee, wled, homeassistant, mqtt, plex, roku, weather, frigate, presence, alexa];
+export const PLUGINS = [hue, govee, wled, homeassistant, mqtt, plex, roku, weather, frigate, presence, push, alexa];
 
 export const triggerPlugin = (source) => PLUGINS.find((p) => p.trigger?.source === source);
 export const stepPlugin = (type) => PLUGINS.find((p) => p.steps?.[type]);
 export const conditionPlugins = PLUGINS.filter((p) => p.condition);
 export const snapshotPlugin = PLUGINS.find((p) => p.snapshot);
+export const notifierPlugins = PLUGINS.filter((p) => p.notifier);
 export const pluginStepTypes = PLUGINS.flatMap((p) => Object.keys(p.steps ?? {}));
 
 // Fresh copies of every plugin's default settings, keyed like the config file.

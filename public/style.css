@@ -213,3 +213,35 @@ pre.code { background: var(--bg); border: 1px solid var(--border); border-radius
 .people { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
 .person { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: grid; gap: 4px; justify-items: start; }
 .person.home { border-color: var(--ok); }
+
+/* ---------- home ---------- */
+.home-screen { display: grid; gap: 14px; max-width: 640px; margin: 0 auto; }
+.home-screen .section-label { margin-bottom: 10px; }
+.mode-grid, .quick-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+.mode-btn, .quick {
+  display: grid; justify-items: center; gap: 4px; padding: 14px 8px; border-radius: 14px; cursor: pointer;
+  background: var(--panel-2); border: 1px solid var(--border); text-transform: capitalize; font-weight: 600;
+  -webkit-tap-highlight-color: transparent; touch-action: manipulation;
+}
+.quick { text-transform: none; font-weight: 500; font-size: 0.92rem; text-align: center; }
+.mode-btn span, .quick span { font-size: 1.5rem; line-height: 1; }
+.mode-btn.on { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.mode-btn:active, .quick:active { transform: scale(0.97); }
+.people-row { display: flex; flex-wrap: wrap; gap: 8px; }
+.person-chip { display: inline-flex; align-items: baseline; gap: 6px; padding: 6px 12px; border-radius: 999px; border: 1px solid var(--border); background: var(--panel-2); }
+.person-chip.home { border-color: var(--ok); }
+.person-chip small { color: var(--muted); }
+.install-hint { display: flex; gap: 12px; align-items: flex-start; justify-content: space-between; border-color: var(--accent); }
+.star.on { color: var(--accent); }
+
+/* installed app / phones: room for the notch and home bar */
+@media (display-mode: standalone) {
+  .top { padding-top: max(16px, env(safe-area-inset-top)); }
+  main { padding-bottom: max(80px, env(safe-area-inset-bottom)); }
+}
+@media (max-width: 600px) {
+  .top { padding: 12px 16px; }
+  .tabs { padding: 0 8px; }
+  .tabs button { padding: 12px 10px; }
+  main { padding: 14px 12px 80px; }
+}

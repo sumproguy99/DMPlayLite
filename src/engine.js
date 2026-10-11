@@ -14,7 +14,7 @@
 //   · mode {mode} · capture / scene {scene} (+ plugin steps)
 import { Token, contains, randomId, sleep, template } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
-import { triggerPlugin, stepPlugin, conditionPlugins, snapshotPlugin } from './plugins/index.js';
+import { triggerPlugin, stepPlugin, conditionPlugins, snapshotPlugin, notifierPlugins } from './plugins/index.js';
 
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
 export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
@@ -391,11 +391,35 @@ export class Engine {
     this.log.info(`Phone alert sent → ${topic}${attached ? ' with snapshot' : ''}`);
   }
 
+  // A phone alert goes to ntfy (if a topic is set) and to every device with Playlite app notifications on.
   async #notify(step, event) {
-    try {
-      await this.sendNtfy(step, event);
-    } catch (err) {
-      this.log.error(`Phone alert failed: ${err.message}`);
+    const ntfy = Boolean(step.topic || this.getConfig().ntfy?.topic);
+    const apps = notifierPlugins.filter((p) => this.services[p.id] && p.notifier.ready(this.services[p.id]));
+    if (!ntfy && !apps.length) {
+      this.log.error('Phone alert failed: no phone alerts set up — add an ntfy topic or turn on app notifications under Connections');
+      return;
+    }
+    if (ntfy) {
+      try {
+        await this.sendNtfy(step, event);
+      } catch (err) {
+        this.log.error(`Phone alert failed: ${err.message}`);
+      }
+    }
+    const msg = {
+      title: template(step.title || 'Playlite', event),
+      message: template(step.message || 'Playlite', event),
+      priority: Number(step.priority) || 3,
+      tags: template(step.tags ?? '', event),
+      click: step.click ? template(step.click, event) : '',
+    };
+    for (const p of apps) {
+      try {
+        const n = await p.notifier.send(this.services[p.id], msg);
+        this.log.info(`App alert sent to ${n} device${n === 1 ? '' : 's'}`);
+      } catch (err) {
+        this.log.error(`App alert failed: ${err.message}`);
+      }
     }
   }
 
