@@ -9,9 +9,10 @@
 //   webhook        event: <name>   (/hooks/<name>, Siri Shortcuts, IFTTT, Zapier, HA rest_command…)
 //   voice          event: alexa    device (exposed name contains)
 //   mode           event: mode.changed  to, from (house mode names)
+//   presence       event: person.arrives | person.leaves (person) | house.occupied (first one home) | house.empty (last one out)
 //   camera         event: object | object.end (Frigate)  camera, label (person, car… or a recognised name), zone, minScore
 //   weather        event: condition (to: clear|cloudy|fog|rain|snow|storm) | reading (reading, above|below) | alert | alert.ended (alert, severity)
-// Conditions: timeWindow {from,to} · dark · fullMoon · weather {condition | reading + above/below} · presence {device, state: home|away} · mode (name or list) · cooldownSec
+// Conditions: timeWindow {from,to} · dark · fullMoon · weather {condition | reading + above/below} · presence {person (or anyone/everyone/nobody) | device, state: home|away} · mode (name or list) · cooldownSec
 // Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click} · mode {mode}
 import { Token, contains, randomId, sleep } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
@@ -21,12 +22,12 @@ import { conditionIs, readingMatches, severityAtLeast } from './integrations/wea
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
 export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
 // "…and it stays that way for N minutes" — only for triggers that describe a state that can end.
-export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue', 'weather'];
+export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue', 'weather', 'presence'];
 export const canHold = (t) => HOLD_SOURCES.includes(t?.source) && !['device.new', 'media.scrobble', 'button', 'alert', 'alert.ended'].includes(t.event);
 // What an event is about: one HA entity, one network device, one Plex player (player vs media state), the house mode.
-export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? e.topic ?? e.reading ?? ''}`;
+export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? e.topic ?? e.reading ?? (e.type?.startsWith('person.') ? e.person : '') ?? ''}`;
 const hasWeather = (w) => Boolean(w && (w.condition || (w.reading && (num(w.above) || num(w.below)))));
-export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device || hasWeather(c.weather)));
+export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device || c.presence?.person || hasWeather(c.weather)));
 // Condition groups that actually check something: "conditions" OR any of "orConditions".
 export const conditionGroups = (routine) => [routine.conditions, ...(routine.orConditions ?? [])].filter(hasConditions);
 
@@ -68,6 +69,7 @@ export function matchesTrigger(trigger, event, opts) {
   if (trigger.source === 'mqtt') return matchesMqtt(trigger, event, opts);
   if (trigger.source === 'weather') return matchesWeather(trigger, event, opts);
   if (trigger.source === 'camera') return matchesCamera(trigger, event);
+  if (trigger.source === 'presence') return !trigger.person || !event.type.startsWith('person.') || contains(event.person, trigger.person);
   if (trigger.player && !contains(event.player, trigger.player)) return false;
   if (trigger.user && !contains(event.user, trigger.user)) return false;
   if (trigger.mediaTypes?.length && event.mediaType && !trigger.mediaTypes.includes(event.mediaType)) return false;
@@ -141,7 +143,7 @@ export class Engine {
   #modeChanges = []; // timestamps, to stop workflows flipping the mode back and forth forever
   #holds = new Map(); // routine|trigger|subject -> { timer, trigger, subject, name } for "for N minutes" triggers
 
-  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null, plex = null, roku = null, weather = null, cameras = null }) {
+  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null, plex = null, roku = null, weather = null, cameras = null, presence = null }) {
     this.getConfig = getConfig;
     this.updateConfig = updateConfig;
     this.lights = lights;
@@ -153,6 +155,7 @@ export class Engine {
     this.roku = roku;
     this.weather = weather;
     this.cameras = cameras;
+    this.presence = presence;
   }
 
   // House mode: one current mode (home, away, movie…). Changing it fires { source: 'mode', type: 'mode.changed', from, to }.
@@ -179,7 +182,7 @@ export class Engine {
   }
 
   handle(event) {
-    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.source === 'hue' && (event.to ?? `button ${event.button ?? ''} ${event.press}`), event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`, event.source === 'camera' && `${event.subLabel ? `${event.subLabel} (${event.label})` : event.label} on ${event.camera}${event.zone ? ` → ${event.zone}` : ''} ${event.score}%`, event.source === 'weather' && (event.type === 'reading' ? `${event.reading} ${event.value}` : event.type === 'condition' ? `${event.from} → ${event.to}` : `${event.alert}${event.headline ? ` — ${event.headline}` : ''}`)]
+    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.source === 'hue' && (event.to ?? `button ${event.button ?? ''} ${event.press}`), event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`, event.source === 'presence' && `${event.person} (${event.by})`, event.source === 'camera' && `${event.subLabel ? `${event.subLabel} (${event.label})` : event.label} on ${event.camera}${event.zone ? ` → ${event.zone}` : ''} ${event.score}%`, event.source === 'weather' && (event.type === 'reading' ? `${event.reading} ${event.value}` : event.type === 'condition' ? `${event.from} → ${event.to}` : `${event.alert}${event.headline ? ` — ${event.headline}` : ''}`)]
       .filter(Boolean)
       .join(' ');
     // chatty sources (MQTT) can send many messages a second — log only the ones that start or end something
@@ -271,10 +274,17 @@ export class Engine {
       if (w.condition && ![w.condition].flat().some((x) => conditionIs(now.condition, x))) return `weather is ${now.condition}`;
       if (w.reading && (num(w.above) || num(w.below)) && !readingMatches(w, now[w.reading], null, { crossing: false })) return `${w.reading} is ${now[w.reading]}`;
     }
-    if (c.presence?.device && this.discovery) {
-      const home = this.discovery.find(c.presence.device).some((d) => d.online);
-      if (c.presence.state === 'home' && !home) return `${c.presence.device} is away`;
-      if (c.presence.state === 'away' && home) return `${c.presence.device} is home`;
+    const who = c.presence?.person || c.presence?.device;
+    if (who) {
+      // a person (or anyone / everyone / nobody) first, else a network device by name
+      const why = this.presence?.check(who, c.presence.state ?? 'home');
+      if (why !== undefined) {
+        if (why) return why;
+      } else if (this.discovery) {
+        const home = this.discovery.find(who).some((d) => d.online);
+        if (c.presence.state === 'home' && !home) return `${who} is away`;
+        if (c.presence.state === 'away' && home) return `${who} is home`;
+      }
     }
     return null;
   }

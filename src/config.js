@@ -73,6 +73,7 @@ function defaults() {
     mqtt: { url: '', username: '', password: '' },
     location: { lat: null, lon: null, name: '' },
     weather: { enabled: true, units: 'f', alerts: true },
+    people: [],
     frigate: { url: '', username: '', password: '', topicPrefix: 'frigate' },
     mode: 'home',
     modes: ['home', 'away', 'movie', 'sleep', 'guest'],

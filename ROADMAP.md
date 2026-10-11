@@ -111,11 +111,11 @@ bring lights to 50% · leak sensor → every light flashes, phone alarm · motio
 
 | Method | How | Effort |
 |---|---|---|
-| **Phone on Wi-Fi** | router client list (OpenWrt / UniFi / ASUS) or ARP/ping sweep | 🟢 Local |
-| **iPhone Shortcuts** | Personal Automation "Arrive/Leave Home" → calls Playlite webhook | 🟢 (works today via /hooks) |
-| Android | Tasker / Automate / Home Assistant app → webhook | 🟢 |
-| **OwnTracks** | open-source GPS app → HTTP/MQTT with zones & distance | 🟡 |
-| Per-person presence + "everyone left" / "first one home" | engine feature on top of the above | 🟢 |
+| ✅ **Phone on Wi-Fi** | ARP/ping sweep (done) · router client list (OpenWrt / UniFi / ASUS) still to do | 🟢 Local |
+| ✅ **iPhone Shortcuts** | Personal Automation "Arrive/Leave Home" → /presence/<person>/home\|away | 🟢 |
+| ✅ Android | Tasker / Automate → the same /presence link, or the Home Assistant app via a HA person | 🟢 |
+| ✅ **OwnTracks** | open-source GPS app → HTTP/MQTT with zones & distance | 🟡 |
+| ✅ Per-person presence + "everyone left" / "first one home" | engine feature on top of the above | 🟢 |
 | Geofence radius & "approaching home" (within 2 km) | OwnTracks distance | 🟡 |
 
 Ideas: first person home after sunset → entry lights on · everyone gone → all off, thermostat eco, notify if a door is open ·
@@ -240,7 +240,7 @@ Ideas: person in driveway after dark → porch lights 100% for 5 min · package 
 8. ✅ Plex control actions (pause on doorbell) + ✅ Roku · Jellyfin still to do
 
 **Phase 3 — Awareness**
-9. Presence: router (OpenWrt/UniFi) + iOS Shortcuts/OwnTracks helpers
+9. ✅ Presence: people via Wi-Fi + OwnTracks + Home Assistant + iOS Shortcuts (router APIs — OpenWrt/UniFi — still to do)
 10. ✅ Weather + NWS severe alerts (forecast triggers, air quality still to do)
 11. ✅ Cameras: Frigate detections + snapshots in phone alerts (ONVIF / UniFi Protect / Reolink events still to do)
 

@@ -20,6 +20,7 @@ import { PlexIntegration } from '../src/integrations/plex.js';
 import { Roku } from '../src/integrations/roku.js';
 import { Weather, conditionOf, conditionIs, readingMatches } from '../src/integrations/weather.js';
 import { Frigate } from '../src/integrations/frigate.js';
+import { Presence, distanceM } from '../src/presence.js';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 
@@ -846,4 +847,101 @@ test('cameras: Frigate login, cameras, detections → triggers, snapshot in a ph
   assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'camera', event: 'motion' } }), /object or object.end/);
   assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'camera', event: 'object', minScore: 150 } }), /0-100/);
   assert.equal(normalizeWorkflow({ ...w, trigger: { source: 'webhook', event: 'doorbell' }, steps: [{ type: 'notify', message: 'Ding', snapshot: true }] }).steps[0].snapshot, '');
+});
+
+test('presence: Wi-Fi, OwnTracks, Home Assistant, Shortcuts → arrives / leaves / house empty, conditions, waits', async () => {
+  const home = { lat: 36.16, lon: -86.78 };
+  assert.ok(Math.abs(distanceM(home, { lat: 36.17, lon: -86.78 }) - 1112) < 5);
+  const devices = [{ name: 'Sams-iPhone', ip: '10.0.0.5', online: false }, { name: 'Alex-Pixel', ip: '10.0.0.6', online: true }];
+  const discovery = Object.assign(new EventEmitter(), { find: (q) => devices.filter((d) => d.name.toLowerCase().includes(String(q).toLowerCase())) });
+  const mqtt = new EventEmitter();
+  const ha = new EventEmitter();
+  const config = {
+    location: home,
+    routines: [],
+    people: [
+      { id: 'sam', name: 'Sam', devices: ['Sams-iPhone'], state: 'away' },
+      { id: 'alex', name: 'Alex', devices: ['Alex-Pixel'], owntracks: 'alex', state: 'away' },
+      { id: 'jo', name: 'Jo', ha: 'person.jo', state: 'away' },
+    ],
+  };
+  const log = { info() {}, warn() {}, error() {}, event() {} };
+  const presence = new Presence({ getConfig: () => config, updateConfig: (fn) => fn(config), discovery, mqtt, ha, log });
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, discovery, presence });
+  const fired = [];
+  engine.fire = (r, e) => fired.push(`${r.id}:${e.person ?? ''}`);
+  presence.on('event', (e) => engine.handle(e));
+  const steps = [{ type: 'wait', ms: 0 }];
+  config.routines = [
+    { id: 'hi', enabled: true, name: 'Anyone home', trigger: { source: 'presence', event: 'person.arrives' }, steps },
+    { id: 'bye-sam', enabled: true, name: 'Sam left', trigger: { source: 'presence', event: 'person.leaves', person: 'sam' }, steps },
+    { id: 'empty', enabled: true, name: 'Away mode', trigger: { source: 'presence', event: 'house.empty' }, steps },
+    { id: 'first', enabled: true, name: 'Welcome', trigger: { source: 'presence', event: 'house.occupied' }, steps },
+  ];
+  const net = (name, online) => {
+    const d = devices.find((x) => x.name === name);
+    d.online = online;
+    discovery.emit('event', { source: 'network', type: online ? 'device.online' : 'device.offline', device: d.name, ip: d.ip });
+  };
+  const ot = (lat, lon, extra = {}) => mqtt.emit('event', { source: 'mqtt', topic: 'owntracks/alex/pixel', json: { _type: 'location', lat, lon, acc: 20, ...extra } });
+
+  net('Sams-iPhone', true); // Wi-Fi: Sam arrives, first one home
+  assert.deepEqual(fired, ['hi:Sam', 'first:Sam']);
+  assert.equal(config.people[0].by, 'Wi-Fi');
+  ot(36.1603, -86.7801); // ~35 m from home
+  assert.equal(config.people[1].state, 'home');
+  net('Alex-Pixel', false); // Alex has OwnTracks, so the phone napping doesn't mean "left"
+  assert.equal(config.people[1].state, 'home');
+  ot(36.1617, -86.78); // ~190 m: inside the jitter margin, still home
+  assert.equal(config.people[1].state, 'home');
+  ot(36.2, -86.78); // 4.4 km away
+  assert.equal(config.people[1].state, 'away');
+  ot(1, 1, { inregions: ['Home'] }); // inside the "home" region wins over coordinates
+  assert.equal(config.people[1].state, 'home');
+  mqtt.emit('event', { source: 'mqtt', topic: 'owntracks/alex/pixel', json: { _type: 'transition', event: 'leave', desc: 'home' } });
+  assert.equal(config.people[1].state, 'away');
+  ot(36.16, -86.78, { acc: 5000 }); // too vague: ignored
+  assert.equal(config.people[1].state, 'away');
+  net('Alex-Pixel', true); // phone joins the Wi-Fi: arrived
+  assert.equal(config.people[1].by, 'Wi-Fi');
+
+  ha.emit('event', { source: 'homeassistant', type: 'state', entity: 'person.jo', to: 'home' });
+  ha.emit('event', { source: 'homeassistant', type: 'state', entity: 'person.jo', to: 'unavailable' });
+  assert.equal(config.people[2].state, 'home');
+  ha.emit('event', { source: 'homeassistant', type: 'state', entity: 'person.jo', to: 'Work' });
+  assert.equal(config.people[2].state, 'away');
+
+  // conditions
+  const cond = (presenceCond) => engine.blockedBy({ conditions: { presence: presenceCond } });
+  assert.equal(cond({ person: 'anyone', state: 'home' }), null);
+  assert.equal(cond({ person: 'everyone', state: 'home' }), 'not everyone is home');
+  assert.equal(cond({ device: 'nobody' }), 'someone is home');
+  assert.equal(cond({ device: 'Jo', state: 'home' }), 'Jo is away'); // the UI's "Who is…" field stores it as device
+  assert.equal(cond({ device: 'Sams-iPhone', state: 'home' }), null); // not a person: a network device
+
+  // Shortcuts: once used, Wi-Fi no longer says "left"
+  fired.length = 0;
+  presence.webhook('alex', 'away');
+  assert.equal(config.people[1].shortcuts, true);
+  net('Sams-iPhone', false); // Wi-Fi-only Sam: phone gone → left; last one out → house empty
+  assert.deepEqual(fired, ['bye-sam:Sam', 'empty:Sam']);
+  assert.equal(cond({ person: 'nobody' }), null);
+  assert.throws(() => presence.webhook('Pat', 'home'), /No person called "Pat"/);
+  assert.equal(presence.set('sam', 'away', 'x'), false); // no change, no events
+
+  // "has been gone 1 minute": cancelled by coming back
+  config.routines = [{ id: 'gone', enabled: true, name: 'Gone a while', trigger: { source: 'presence', event: 'person.leaves', person: 'Sam', forMin: 0.001 }, steps }];
+  fired.length = 0;
+  presence.set('sam', 'home', 'test');
+  presence.set('sam', 'away', 'test');
+  presence.set('sam', 'home', 'test'); // back before the wait ran out
+  await sleep(150);
+  assert.deepEqual(fired, []);
+  presence.set('sam', 'away', 'test');
+  await sleep(150);
+  assert.deepEqual(fired, ['gone:Sam']);
+
+  const w = { name: 'p', steps };
+  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'presence', event: 'arrive' } }), /person.arrives/);
+  assert.equal(normalizeWorkflow({ ...w, trigger: { source: 'presence', event: 'house.empty', forMin: 15 } }).trigger.forMin, 15);
 });

@@ -209,3 +209,7 @@ pre.code { background: var(--bg); border: 1px solid var(--border); border-radius
 .cam-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-top: 8px; }
 .cam-grid figure { margin: 0; }
 .cam-grid img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; background: var(--panel-2); display: block; }
+
+.people { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; }
+.person { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; display: grid; gap: 4px; justify-items: start; }
+.person.home { border-color: var(--ok); }

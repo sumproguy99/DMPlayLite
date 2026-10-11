@@ -9,7 +9,8 @@ through Alexa, Siri, or AI agents like Claude.
 IF  Plex opens on the Living Room TV        THEN pulse the basement lights 100→70→100% ×5
 IF  a video starts playing                  THEN natural white 100%, fade to 10%
 IF  paused / play pressed                   THEN slowly up to 70% / back down to 10%
-IF  my iPhone joins the Wi-Fi after dark    THEN porch to 80% warm
+IF  someone comes home after dark          THEN porch to 80% warm
+IF  everyone has left                      THEN away mode, lights off
 IF  the front door (Home Assistant) opens   THEN hallway 40%, ping my phone via ntfy
 IF  sunset −30 min on a full moon           THEN basement WLED moonlight blue
 IF  a tornado warning is issued here        THEN every light red, urgent phone alert
@@ -32,6 +33,7 @@ Environment: `PORT` (8787), `PLAYLITE_DATA` (config folder, `./data`), `ANTHROPI
 |---|---|
 | **Login** | Accounts with scrypt-hashed passwords, 30-day sessions, add family members under 👤 |
 | **Workflows** | IF/THEN builder with service tiles and "Or when…" extra triggers (any one starts it) and "Or only if…" condition groups (checks in a group must all pass; any group passing is enough), and "…stays that way for N minutes" on Plex / network / Home Assistant / mode triggers (door open 10 min, phone gone 30 min), *or* type the idea in plain English and AI drafts it for review |
+| **People** | Who's home, per person, from any mix of: their phone on the Wi-Fi (no setup), **OwnTracks** GPS (MQTT or HTTP; a "home" region or distance from your location), a **Home Assistant** person, or an **iPhone Shortcut** (arrive / leave automation calling a link). Once a person has GPS / HA / a Shortcut, a napping phone never counts as "left". Triggers: *someone comes home / leaves*, *first one home*, *everyone left* (with "for N minutes"); conditions *anyone / everyone / nobody / Sam is home*; "Mark home/away" by hand or via the AI |
 | **Network** | Always-on discovery (mDNS/Bonjour, SSDP/UPnP, ARP, subnet sweep every 10 min). Names & classifies phones, cameras, TVs, speakers, hubs; handles Wi-Fi extenders that share one MAC. Triggers: *device joins / leaves / new device* |
 | **Plex** | Play / pause / resume / stop / app opened — no Plex Pass needed (webhooks optional). "▶️ Plex playback" step pauses / resumes / stops / skips on a player (default: the one that triggered it or is playing) — e.g. doorbell → pause the movie |
 | **Roku** | "📺 Roku remote" step: any remote button (play/pause, home, volume, power on Roku TVs) or open Plex / Netflix / YouTube… over the local ECP API; Rokus found by network discovery |

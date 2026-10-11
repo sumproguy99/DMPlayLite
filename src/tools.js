@@ -34,6 +34,11 @@ TRIGGERS (source → event → optional filters):
   OR "field" (JSON key, dots for nesting) with optional "value" — a field trigger fires when that field CHANGES (to "value").
   Zigbee2MQTT motion: {"source":"mqtt","event":"message","topic":"zigbee2mqtt/Hall motion","field":"occupancy","value":"true"}
   No motion for 10 min: same with "value":"false","forMin":10. Templates: {{topic}}, {{payload}}, {{json.temperature}}.
+- presence (people, see list_people — tracked by phone on Wi-Fi, OwnTracks GPS, Home Assistant or Shortcuts) →
+  person.arrives | person.leaves (filter "person": name; leave it out for anyone) | house.occupied (first person home) |
+  house.empty (last person left). Everyone gone → away mode: {"source":"presence","event":"house.empty"} + step {"type":"mode","mode":"away"}.
+  Prefer these over network device.online/offline for people. Templates: {{person}}, {{by}}.
+  Conditions are checked AFTER the change, so "only if nobody was home" is house.occupied, not a "nobody" condition.
 - camera (Frigate NVR, see list_cameras) → object (Frigate confirmed a person/car/dog/cat/package… — once per sighting, and again when it
   walks into a new zone) | object.end (it left / the event ended). Filters: "camera" (name contains), "label" ("person", "car", or a name
   Frigate recognised, e.g. a face), "zone" (only when it is in / enters that zone, e.g. "porch"), "minScore" (0-100 confidence).
@@ -47,11 +52,11 @@ TRIGGERS (source → event → optional filters):
     e.g. "Tornado Warning", "Severe Thunderstorm"), "severity" (minimum: Minor|Moderate|Severe|Extreme).
     Templates: {{alert}}, {{headline}}, {{severity}}, {{instruction}}, {{area}}. Tornado warning → lights red + urgent push:
     trigger {"source":"weather","event":"alert","alert":"Tornado Warning"}, steps set color #ff0000 + notify priority 5 "{{headline}}".
-"forMin": N on a plex, network, homeassistant, mode, mqtt, hue motion/contact or weather condition/reading trigger = only if it STAYS that way for N minutes
+"forMin": N on a plex, network, homeassistant, mode, mqtt, presence, hue motion/contact or weather condition/reading trigger = only if it STAYS that way for N minutes
   (e.g. door open 10 min: {"source":"homeassistant","event":"state","entity":"front_door","to":"on","forMin":10};
   phone gone 30 min: {"source":"network","event":"device.offline","device":"iPhone","forMin":30}). Waits reset on restart.
 CONDITIONS: timeWindow {"from":"HH:MM","to":"HH:MM"} · dark: true (after sunset/before sunrise) · light: true · fullMoon: true ·
-  presence {"device": "iPhone", "state": "home"|"away"} · mode: "movie" or ["movie","sleep"] (current house mode is one of these) ·
+  presence {"person": "Dustin" | "anyone" | "everyone" | "nobody", "state": "home"|"away"} (a network "device" name also works) · mode: "movie" or ["movie","sleep"] (current house mode is one of these) ·
   weather {"condition": "rain"} (or a list) · weather {"reading": "temperature", "below": 40} (or "above") — the latest weather, see get_weather.
   Checks inside one group are AND. For OR use orConditions, e.g. "after dark OR in movie mode" →
   "conditions": {"dark": true}, "orConditions": [{"mode": "movie"}].
@@ -102,6 +107,7 @@ export function normalizeWorkflow(w) {
   for (const t of [w.trigger, ...(w.orTriggers ?? [])]) {
     if (t.source === 'hue' && t.event === 'button') t.press ||= 'short_release'; // one press = one run
     if (t.source === 'weather') checkWeatherTrigger(t);
+    if (t.source === 'presence' && !['person.arrives', 'person.leaves', 'house.occupied', 'house.empty'].includes(t.event)) throw new Error('presence trigger event must be person.arrives, person.leaves, house.occupied or house.empty');
     if (t.source === 'camera') {
       if (!['object', 'object.end'].includes(t.event)) throw new Error('camera trigger event must be object or object.end');
       if (t.minScore != null && t.minScore !== '' && !(Number(t.minScore) >= 0 && Number(t.minScore) <= 100)) throw new Error('minScore must be 0-100');
@@ -150,7 +156,7 @@ export function normalizeWorkflow(w) {
 }
 
 export function createTools(ctx) {
-  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, weather, frigate, log } = ctx;
+  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, weather, frigate, presence, log } = ctx;
   const findRoutine = (q) => {
     const rs = getConfig().routines;
     const s = String(q ?? '').toLowerCase();
@@ -282,6 +288,21 @@ export function createTools(ctx) {
       description: 'Set the lights back to a saved scene, optionally fading over transitionMs.',
       inputSchema: { type: 'object', properties: { scene: { type: 'string' }, transitionMs: { type: 'number' } }, required: ['scene'], additionalProperties: false },
       run: async (a) => ({ ok: true, scene: (await engine.applyScene(a.scene, a.transitionMs ?? 0)).name }),
+    },
+    {
+      name: 'list_people',
+      description: 'Who is home: each person with home/away, since when and what said so (Wi-Fi, OwnTracks, Home Assistant, Shortcut, manual).',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: async () => (presence?.summary() ?? []).map(({ name, state, since, by, devices, owntracks, ha }) => ({ name, state, since, by, trackedBy: [devices?.length && 'Wi-Fi', owntracks && 'OwnTracks', ha && 'Home Assistant'].filter(Boolean) })),
+    },
+    {
+      name: 'set_presence',
+      description: 'Mark a person home or away by hand (e.g. "I\'m leaving", "Sam is home"). Runs any arrives/leaves workflows.',
+      inputSchema: { type: 'object', properties: { person: { type: 'string' }, state: { type: 'string', enum: ['home', 'away'] } }, required: ['person', 'state'], additionalProperties: false },
+      run: async (a) => {
+        if (!presence) throw new Error('Presence is not available');
+        return { ok: true, changed: presence.set(a.person, a.state, 'AI') };
+      },
     },
     {
       name: 'list_cameras',

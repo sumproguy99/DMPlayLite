@@ -3,6 +3,7 @@
 // ---------- vocab ----------
 const SOURCES = [
   { id: 'plex', icon: '🎬', name: 'Plex', blurb: 'Playback & players' },
+  { id: 'presence', icon: '👪', name: 'People', blurb: 'Someone comes home or leaves' },
   { id: 'network', icon: '📶', name: 'Network device', blurb: 'Phones, TVs, anything on Wi-Fi' },
   { id: 'homeassistant', icon: '🏠', name: 'Home Assistant', blurb: 'Any sensor, switch, lock…' },
   { id: 'hue', icon: '🔘', name: 'Hue sensor', blurb: 'Motion, dimmers, buttons, contact' },
@@ -38,6 +39,12 @@ const EVENTS = {
   webhook: [],
   mode: [['mode.changed', 'House mode changes']],
   mqtt: [['message', 'A message arrives']],
+  presence: [
+    ['person.arrives', 'Someone comes home'],
+    ['person.leaves', 'Someone leaves'],
+    ['house.occupied', 'The first person gets home'],
+    ['house.empty', 'Everyone has left'],
+  ],
   camera: [['object', 'Something is seen'], ['object.end', 'It leaves / goes away']],
   weather: [
     ['condition', 'The sky changes (rain starts…)'],
@@ -238,6 +245,7 @@ function describeTrigger(tr) {
   else if (tr.source === 'time') text = `${b(tr.event === 'sun.sunset' ? 'sunset' : 'sunrise')}${tr.offsetMin ? ` ${tr.offsetMin > 0 ? '+' : '−'}${Math.abs(tr.offsetMin)} min` : ''}`;
   else if (tr.source === 'hue') text = `${b(tr.device || 'any Hue sensor')} ${tr.event === 'button' ? `${HUE_PRESSES.find(([k]) => k === (tr.press ?? 'short_release'))?.[1].toLowerCase() ?? esc(tr.press)}${tr.button ? ` on button ${b(tr.button)}` : ''}` : tr.event === 'motion' ? (tr.to === 'clear' ? 'motion clears' : tr.to === 'detected' ? 'detects motion' : 'motion changes') : tr.to ? `is ${b(tr.to)}` : 'opens or closes'}`;
   else if (tr.source === 'mqtt') text = `MQTT ${b(tr.topic || 'any topic')}${tr.field ? ` — ${b(tr.field)} changes${tr.value != null && tr.value !== '' ? ` to ${b(tr.value)}` : ''}` : tr.payload ? ` says ${b(tr.payload)}` : ''}`;
+  else if (tr.source === 'presence') text = tr.event === 'house.empty' ? `${b('everyone')} has left` : tr.event === 'house.occupied' ? `the ${b('first person')} gets home` : `${b(tr.person || 'anyone')} ${tr.event === 'person.leaves' ? 'leaves' : 'comes home'}`;
   else if (tr.source === 'camera') text = `${b(tr.label || 'anything')} ${tr.event === 'object.end' ? 'leaves' : 'is seen'} on ${b(tr.camera || 'any camera')}${tr.zone ? ` in ${b(tr.zone)}` : ''}${tr.minScore ? ` (${tr.minScore}%+ sure)` : ''}`;
   else if (tr.source === 'weather') {
     if (tr.event === 'condition') text = tr.to ? `it starts to ${b(tr.to === 'clear' ? 'clear up' : tr.to === 'cloudy' ? 'cloud over' : tr.to === 'storm' ? 'storm' : tr.to)}` : 'the weather changes';
@@ -262,7 +270,8 @@ function describeConditionGroup(c = {}) {
   if (c.light) out.push("it's daytime");
   if (c.fullMoon) out.push('full moon');
   if (c.mode?.length) out.push(`mode is ${[c.mode].flat().join(' or ')}`);
-  if (c.presence?.device) out.push(`${c.presence.device} is ${c.presence.state}`);
+  const who = c.presence?.person || c.presence?.device;
+  if (who) out.push(/^nobody$/i.test(who) ? 'nobody is home' : `${who} is ${c.presence.state ?? 'home'}`);
   if (c.weather?.condition) out.push(`it's ${[c.weather.condition].flat().map((x) => SKY_WORDS[x] ?? x).join(' or ')}`);
   if (c.weather?.reading && (c.weather.above != null || c.weather.below != null)) out.push(readingText(c.weather));
   return out.map(esc).join(' · ');
@@ -374,7 +383,7 @@ function targetPicker(selected, path) {
 }
 
 // Same rule as the engine: only triggers describing a state that can end can "stay that way".
-const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue', 'weather'].includes(tr.source) && !['device.new', 'media.scrobble', 'button', 'alert', 'alert.ended'].includes(tr.event);
+const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue', 'weather', 'presence'].includes(tr.source) && !['device.new', 'media.scrobble', 'button', 'alert', 'alert.ended'].includes(tr.event);
 
 function triggerFields(tr, base = 'trigger') {
   if (!canHold(tr)) {
@@ -456,6 +465,14 @@ function sourceFields(tr, base) {
       ${last ? `<p class="small muted" style="margin:6px 0 0">Last message: <code>${esc(last.payload.slice(0, 200))}</code></p>` : ''}
       <p class="small muted" style="margin:6px 0 0">${tr.field ? 'Fires when that field changes — not on every repeat of the same value.' : 'Leave the JSON field empty to match the whole message (Tasmota “ON”, rtl_433 lines…).'} Use {{topic}}, {{payload}}, {{json.<i>field</i>}} in later steps.</p>
       ${S.state.mqtt?.status.connected ? '' : '<p class="small muted">Connect MQTT under Connections first.</p>'}`;
+  }
+  if (tr.source === 'presence') {
+    const people = S.state.people ?? [];
+    if (!tr.event.startsWith('person.')) delete tr.person;
+    return `<div class="fields">${eventSelect}
+      ${tr.event.startsWith('person.') ? `<label class="field grow">Who<input type="text" data-bind="${base}.person" value="${esc(tr.person)}" placeholder="anyone" list="peoplelist"></label>
+      <datalist id="peoplelist">${people.map((p) => `<option value="${esc(p.name)}">`).join('')}</datalist>` : ''}</div>
+      <p class="small muted" style="margin:6px 0 0">${people.length ? `Tracking ${people.map((p) => `${esc(p.name)} (${p.state === 'home' ? '🏠 home' : '🚶 away'})`).join(', ')}. Use {{person}} in later steps.` : 'Add the people who live here on the <b>Network</b> tab first (👪 People).'}</p>`;
   }
   if (tr.source === 'camera') {
     const fr = S.state.frigate ?? {};
@@ -662,7 +679,7 @@ function conditionFields(c = {}, base) {
           <label class="row"><input type="checkbox" data-bind="${base}.fullMoon" data-type="flag" ${c.fullMoon ? 'checked' : ''}> 🌕 Full moon</label>
         </div>
         <div class="fields" style="margin-top:10px">
-          <label class="field grow">Someone is…<input type="text" data-bind="${base}.presence.device" value="${esc(c.presence?.device)}" placeholder="device name, e.g. iPhone" list="netdevs2"></label>
+          <label class="field grow">Who is…<input type="text" data-bind="${base}.presence.device" value="${esc(c.presence?.person || c.presence?.device)}" placeholder="a person, anyone, everyone, nobody — or a device" list="netdevs2"></label>
           <label class="field">&nbsp;<select data-bind="${base}.presence.state">${['home', 'away'].map((s) => `<option ${c.presence?.state === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
         </div>
         <div class="fields" style="margin-top:10px">
@@ -719,7 +736,7 @@ function renderEditor() {
           <button class="btn sm" id="add-orc">+ Or only if…</button>
           <label class="field row small" style="margin-left:auto">Cooldown (s)<input type="number" min="0" data-bind="cooldownSec" data-type="num" value="${d.cooldownSec ?? ''}" placeholder="none" style="width:90px"></label>
         </div>
-        <datalist id="netdevs2">${[...new Set(S.network.filter((x) => ['phone', 'tablet', 'apple'].includes(x.kind)).map((x) => x.name).filter(Boolean))].map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+        <datalist id="netdevs2">${[...(S.state.people ?? []).map((p) => p.name), 'anyone', 'everyone', 'nobody'].map((n) => `<option value="${esc(n)}">`).join('')}${[...new Set(S.network.filter((x) => ['phone', 'tablet', 'apple'].includes(x.kind)).map((x) => x.name).filter(Boolean))].map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
       </div>
 
       <div class="block then">
@@ -994,6 +1011,88 @@ function newStep(type) {
 }
 
 // ---------- network ----------
+// ---------- people ----------
+function peopleCard() {
+  const people = S.state.people ?? [];
+  const how = (p) => [p.devices?.length && '📶 Wi-Fi', p.owntracks && '📍 OwnTracks', p.ha && '🏠 HA', p.shortcuts && '⚡ Shortcuts'].filter(Boolean).join(' · ');
+  return `<div class="card stack" style="margin-bottom:14px">
+      <div class="row spread"><h2>👪 People</h2><button class="btn" id="people-edit">${people.length ? 'Edit people' : '+ Add people'}</button></div>
+      ${people.length ? `<div class="people">${people.map((p) => `
+        <div class="person ${p.state === 'home' ? 'home' : ''}">
+          <div><b>${p.state === 'home' ? '🏠' : '🚶'} ${esc(p.name)}</b> <span class="small muted">${p.state === 'home' ? 'home' : 'away'}${p.since ? ` · ${ago(p.since)}` : ''}${p.by ? ` · by ${esc(p.by)}` : ''}</span></div>
+          <div class="small muted">${how(p) || '<span style="color:var(--warn)">not tracked yet — edit to add a phone</span>'}</div>
+          <button class="btn sm ghost" data-pset="${esc(p.id)}" data-state="${p.state === 'home' ? 'away' : 'home'}">Mark ${p.state === 'home' ? 'away' : 'home'}</button>
+        </div>`).join('')}</div>` : '<p class="small muted" style="margin:0">Add the people who live here to get “someone comes home / everyone left” triggers and “only if someone is home” checks — more reliable than watching a single device.</p>'}
+    </div>`;
+}
+
+function wirePeople(el) {
+  el.querySelector('#people-edit').onclick = () => openPeople();
+  el.querySelectorAll('[data-pset]').forEach((b) => (b.onclick = guard(async () => {
+    await api('POST', '/api/people/state', { person: b.dataset.pset, state: b.dataset.state });
+    await refresh();
+    renderNetwork();
+  })));
+}
+
+function openPeople() {
+  const list = structuredClone(S.state.people ?? []).map(({ id, name, devices, owntracks, ha, region, radius, shortcuts }) => ({ id, name, devices: (devices ?? []).join(', '), owntracks, ha, region, radius, shortcuts }));
+  if (!list.length) list.push({ name: '', devices: '' });
+  const dlg = $('#editor');
+  const phones = [...new Set(S.network.filter((d) => ['phone', 'tablet', 'apple', 'watch'].includes(d.kind)).map((d) => d.name).filter(Boolean))];
+  const draw = () => {
+    dlg.innerHTML = `
+    <div class="dlg-head"><h2>👪 People</h2></div>
+    <div class="dlg-body">
+      <p class="small muted" style="margin:0">Give each person at least one way to be tracked. Their phone on the Wi-Fi works with no setup but phones nap, so “left” comes ~10 minutes late; for exact arrive/leave add <b>OwnTracks</b> (GPS app), a <b>Home Assistant</b> person, or an <b>iPhone Shortcut</b> — then Wi-Fi only ever says “arrived”.</p>
+      ${list.map((p, i) => `
+      <div class="block">
+        <div class="row spread"><label class="field grow">Name<input type="text" data-pp="${i}.name" value="${esc(p.name)}" placeholder="e.g. Sam"></label><button class="btn sm ghost danger" data-pdel="${i}">Remove</button></div>
+        <div class="fields" style="margin-top:10px">
+          <label class="field grow">📶 Phone on Wi-Fi <small>(device names, comma-separated)</small><input type="text" data-pp="${i}.devices" value="${esc(p.devices)}" placeholder="e.g. Sams-iPhone" list="pphones"></label>
+          <label class="field">📍 OwnTracks user <small>(or user/device)</small><input type="text" data-pp="${i}.owntracks" value="${esc(p.owntracks)}" placeholder="optional"></label>
+          <label class="field">🏠 Home Assistant entity<input type="text" data-pp="${i}.ha" value="${esc(p.ha)}" placeholder="person.sam" list="haents"></label>
+        </div>
+        ${p.name ? `<details style="margin-top:8px"><summary class="small muted">Phone setup for ${esc(p.name)}</summary>
+          <div class="stack small" style="margin-top:8px">
+            <div><b>iPhone Shortcuts</b> — Automation → <i>Arrive</i> at Home → “Get contents of URL”, turn off “Ask before running”:${copyBox(S.state.urls.presence.replace('<person>', encodeURIComponent(p.name)).replace('<state>', 'home'))}and another for <i>Leave</i>:${copyBox(S.state.urls.presence.replace('<person>', encodeURIComponent(p.name)).replace('<state>', 'away'))}</div>
+            <div><b>OwnTracks</b> — either MQTT mode to the same broker as Playlite (user name above), or HTTP mode with this URL; add a region called “home” (or Playlite uses your home location${S.state.location?.lat ? '' : ' — set it under Connections'}):${copyBox(S.state.urls.owntracks.replace('<person>', encodeURIComponent(p.name)))}</div>
+          </div></details>` : ''}
+      </div>`).join('')}
+      <datalist id="pphones">${phones.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+      <datalist id="haents" data-ha-list></datalist>
+      <button class="btn" id="padd">+ Add a person</button>
+    </div>
+    <div class="dlg-foot"><button class="btn" id="pcancel">Cancel</button><button class="btn primary" id="psave">Save</button></div>`;
+    wireCopy(dlg);
+    fillHaEntities().catch(() => {});
+    dlg.querySelectorAll('[data-pp]').forEach((el) => (el.oninput = () => {
+      const [i, k] = el.dataset.pp.split('.');
+      list[+i][k] = el.value;
+    }));
+    dlg.querySelectorAll('[data-pp$=".name"]').forEach((el) => el.addEventListener('change', draw)); // show the setup links once named
+    dlg.querySelectorAll('[data-pdel]').forEach((b) => (b.onclick = () => {
+      list.splice(+b.dataset.pdel, 1);
+      draw();
+    }));
+    $('#padd').onclick = () => {
+      list.push({ name: '', devices: '' });
+      draw();
+    };
+    $('#pcancel').onclick = () => dlg.close();
+    $('#psave').onclick = guard(async () => {
+      const people = list.filter((p) => p.name.trim()).map((p) => ({ ...p, devices: p.devices.split(',').map((d) => d.trim()).filter(Boolean) }));
+      await api('PUT', '/api/people', people);
+      dlg.close();
+      toast('People saved');
+      await refresh();
+      renderNetwork();
+    });
+  };
+  draw();
+  dlg.showModal();
+}
+
 function renderNetwork() {
   const el = $('#tab-network');
   const q = S.netFilter.toLowerCase();
@@ -1011,6 +1110,7 @@ function renderNetwork() {
       <div><h2>Network</h2><p class="sub" style="margin:0">Always scanning — ${S.network.filter((d) => d.online).length} online of ${S.network.length} seen · last scan ${st.lastCycle ? ago(st.lastCycle) : '…'}</p></div>
       <button class="btn" id="net-scan">Scan now</button>
     </div>
+    ${peopleCard()}
     <div class="row" style="margin-bottom:12px">
       <input type="text" id="net-q" placeholder="Search name, IP, type…" value="${esc(S.netFilter)}" style="flex:1;min-width:180px">
       <label class="row small"><input type="checkbox" id="net-online" ${S.netOnline ? 'checked' : ''}> Online only</label>
@@ -1031,6 +1131,7 @@ function renderNetwork() {
           </div>
         </div>`).join('') || '<div class="card empty">Nothing yet — the first scan takes a few seconds.</div>'}
     </div>`;
+  wirePeople(el);
   $('#net-scan').onclick = guard(async (e) => busy(e.target, 'Scanning…', async () => {
     const res = await api('POST', '/api/network/scan');
     S.network = res.devices;
@@ -1648,7 +1749,7 @@ if (saved && saved !== 'routines' && document.getElementById(`tab-${saved}`)) sh
 
 setInterval(() => api('GET', '/api/state').then((s) => {
   const waitingChanged = JSON.stringify(s.waiting) !== JSON.stringify(S.state.waiting);
-  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky, weather: s.weather, frigate: s.frigate });
+  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky, weather: s.weather, frigate: s.frigate, people: s.people });
   renderHeader();
   if (waitingChanged && !$('#idea')?.value) renderRoutines(); // don't wipe an idea being typed
 }).catch(() => {}), 10_000);

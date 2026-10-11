@@ -46,7 +46,7 @@ function send(res, status, body, headers = {}) {
 }
 
 export function createServer(app) {
-  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, wled, hueSensors, weather, frigate, alexa, assistant, tools, scheduler, auth } = app;
+  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, wled, hueSensors, weather, frigate, presence, alexa, assistant, tools, scheduler, auth } = app;
   const { getConfig, updateConfig } = config;
   let plexServers = []; // from the last sign-in; tokens stay server-side
 
@@ -87,6 +87,7 @@ export function createServer(app) {
       location: c.location,
       sky: { sunrise: sun?.sunrise, sunset: sun?.sunset, moon: moonName(phase), moonPhase: phase },
       weather: weather?.summary() ?? null,
+      people: presence?.summary() ?? [],
       frigate: { url: c.frigate?.url ?? '', username: c.frigate?.username ?? '', hasPassword: Boolean(c.frigate?.password), topicPrefix: c.frigate?.topicPrefix || 'frigate', status: frigate?.status ?? {}, cameras: frigate?.cameras ?? [], recent: frigate?.recent ?? [] },
       network: { status: discovery.status, online: discovery.list().filter((d) => d.online).length, total: discovery.devices.size },
       urls: {
@@ -96,6 +97,8 @@ export function createServer(app) {
         run: `${base[0]}/run/<workflow>?key=${key}`,
         mode: `${base[0]}/mode/<mode>?key=${key}`,
         scene: `${base[0]}/scene/<scene>?key=${key}`,
+        presence: `${base[0]}/presence/<person>/<state>?key=${key}`,
+        owntracks: `${base[0]}/presence/owntracks?key=${key}&person=<person>`,
         ask: `${base[0]}/ask?key=${key}&q=`,
         mcp: `${base[0]}/mcp?key=${key}`,
       },
@@ -402,6 +405,47 @@ export function createServer(app) {
       await frigate.restart();
       return { ok: true, ...found };
     },
+    'PUT /api/people': async (req) => {
+      const list = await readJson(req);
+      if (!Array.isArray(list)) throw new HttpError(400, 'Expected a list of people');
+      const old = getConfig().people ?? [];
+      const ids = new Set();
+      const people = list.map((p) => {
+        const name = String(p.name ?? '').trim();
+        if (!name) throw new HttpError(400, 'Every person needs a name');
+        if (/^(anyone|everyone|someone|nobody)$/i.test(name)) throw new HttpError(400, `"${name}" is reserved — pick another name`);
+        let id = p.id || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || randomId(3);
+        while (ids.has(id)) id += '-2';
+        ids.add(id);
+        const prev = old.find((x) => x.id === id) ?? {};
+        const clean = (v) => String(v ?? '').trim();
+        return {
+          id,
+          name,
+          devices: [p.devices ?? []].flat().map(clean).filter(Boolean),
+          owntracks: clean(p.owntracks),
+          ha: clean(p.ha),
+          ...(clean(p.region) ? { region: clean(p.region) } : {}),
+          ...(Number(p.radius) > 0 ? { radius: Number(p.radius) } : {}),
+          shortcuts: Boolean(p.shortcuts ?? prev.shortcuts),
+          state: prev.state ?? 'away',
+          since: prev.since ?? null,
+          by: prev.by ?? null,
+        };
+      });
+      updateConfig((c) => (c.people = people));
+      presence.reconcile();
+      return { ok: true, people };
+    },
+    'POST /api/people/state': async (req, url, user) => {
+      const { person, state } = await readJson(req);
+      try {
+        presence.set(person, state, `${user} (manual)`);
+      } catch (err) {
+        throw new HttpError(400, err.message);
+      }
+      return { ok: true };
+    },
     'GET /api/mqtt/topics': (req, url) => mqtt.recent(url.searchParams.get('q') ?? '').slice(0, 300),
     'POST /api/ntfy/settings': async (req) => {
       const { server, topic, token } = await readJson(req);
@@ -485,6 +529,27 @@ export function createServer(app) {
       }
       return res.writeHead(200).end(`House mode is now ${engine.mode}`);
     }
+    if (p === '/presence/owntracks') {
+      // OwnTracks HTTP mode: URL …/presence/owntracks?key=…&person=Name; it expects a JSON list back
+      const msg = JSON.parse((await readBody(req)) || 'null');
+      try {
+        presence.owntracks(url.searchParams.get('person') ?? req.headers['x-limit-u'] ?? '', msg);
+      } catch (err) {
+        return send(res, 404, { error: err.message });
+      }
+      return send(res, 200, []);
+    }
+    if (p.startsWith('/presence/')) {
+      // iOS Shortcuts automation "When I arrive / leave home" → GET /presence/<person>/home|away
+      const [, , who, state] = p.split('/').map(decodeURIComponent);
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      try {
+        const person = presence.webhook(who, String(state).toLowerCase());
+        return res.writeHead(200).end(`${person.name} is ${state}`);
+      } catch (err) {
+        return res.writeHead(400).end(err.message);
+      }
+    }
     if (p.startsWith('/scene/')) {
       // Siri: "Hey Siri, reading lights" → GET /scene/reading
       res.setHeader('Content-Type', 'text/plain; charset=utf-8');
@@ -544,7 +609,7 @@ export function createServer(app) {
     const url = new URL(req.url, 'http://local');
     const p = url.pathname;
     try {
-      if (p === '/webhooks/plex' || p.startsWith('/hooks/') || p.startsWith('/run/') || p.startsWith('/mode/') || p.startsWith('/scene/') || p === '/ask' || p === '/mcp') return await handleKeyed(req, res, url);
+      if (p === '/webhooks/plex' || p.startsWith('/hooks/') || p.startsWith('/run/') || p.startsWith('/mode/') || p.startsWith('/scene/') || p.startsWith('/presence/') || p === '/ask' || p === '/mcp') return await handleKeyed(req, res, url);
       if (['/api/auth/status', '/api/auth/login', '/api/auth/setup'].includes(p)) return await handleAuthPublic(req, res, url);
       if (OPEN_FILES.has(p)) return serveStatic(res, p);
 
