@@ -19,6 +19,8 @@ import { HueSensors } from '../src/integrations/huesensors.js';
 import { PlexIntegration } from '../src/integrations/plex.js';
 import { Roku } from '../src/integrations/roku.js';
 import { Weather, conditionOf, conditionIs, readingMatches } from '../src/integrations/weather.js';
+import { Frigate } from '../src/integrations/frigate.js';
+import { EventEmitter } from 'node:events';
 import http from 'node:http';
 
 test('sunrise/sunset are plausible (Nashville, June 21)', () => {
@@ -743,4 +745,105 @@ test('weather: conditions, crossings, alerts (new / update / ended / outside US)
   assert.equal(normalizeWorkflow({ ...w, trigger: { source: 'weather', event: 'condition', to: 'rain', forMin: 30 } }).trigger.forMin, 30);
   assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'weather', event: 'alert', forMin: 5 } }), /only works with/);
   assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'webhook', event: 'x' }, conditions: { weather: { condition: 'sunny' } } }), /must be one of/);
+});
+
+test('cameras: Frigate login, cameras, detections → triggers, snapshot in a phone alert, MCP image', async (t) => {
+  const JPEG = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 1, 2, 3, 0xff, 0xd9]);
+  const hits = [];
+  const frigateSrv = await listen((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    hits.push(url.pathname);
+    if (url.pathname === '/api/login') {
+      let b = '';
+      req.on('data', (c) => (b += c)).on('end', () => (JSON.parse(b).password === 'pw' ? res.writeHead(200, { 'Set-Cookie': 'frigate_token=abc; Path=/; HttpOnly' }).end('{}') : res.writeHead(401).end()));
+      return;
+    }
+    if (req.headers.cookie !== 'frigate_token=abc') return res.writeHead(401).end();
+    if (url.pathname === '/api/version') return res.end('0.15.1-abc');
+    if (url.pathname === '/api/config') return res.end(JSON.stringify({ cameras: { front_door: { zones: { porch: {}, walkway: {} } }, driveway: { zones: {} }, old: { enabled: false } } }));
+    if (url.pathname === '/api/events/ev1/snapshot.jpg' || url.pathname === '/api/driveway/latest.jpg') return res.writeHead(200, { 'Content-Type': 'image/jpeg' }).end(JPEG);
+    res.writeHead(404).end();
+  });
+  t.after(() => frigateSrv.close());
+  const pushes = [];
+  const ntfySrv = await listen(async (req, res) => {
+    const chunks = [];
+    for await (const c of req) chunks.push(c);
+    pushes.push({ method: req.method, url: req.url, filename: req.headers.filename, auth: req.headers.authorization, body: Buffer.concat(chunks) });
+    res.end('{}');
+  });
+  t.after(() => ntfySrv.close());
+
+  const mqtt = new EventEmitter();
+  const log = { warns: [], info() {}, warn(m) { this.warns.push(m); }, error(m) { this.warns.push(m); }, event() {} };
+  const config = { routines: [], ntfy: { server: `http://127.0.0.1:${ntfySrv.address().port}`, topic: 'home', token: 'tk' }, frigate: { url: `http://127.0.0.1:${frigateSrv.address().port}`, username: 'admin', password: 'pw', topicPrefix: 'frigate' } };
+  const frigate = new Frigate(() => config, mqtt, log);
+  await frigate.restart();
+  assert.equal(frigate.status.connected, true);
+  assert.equal(frigate.status.version, '0.15.1-abc');
+  assert.deepEqual(frigate.cameras, [{ name: 'front_door', zones: ['porch', 'walkway'] }, { name: 'driveway', zones: [] }]);
+  assert.equal(hits.filter((h) => h === '/api/login').length, 1); // logged in once, cookie reused
+
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, cameras: frigate });
+  const fired = [];
+  const realFire = engine.fire.bind(engine);
+  engine.fire = (r, e) => {
+    fired.push(`${r.id}:${e.type}${e.zone ? `:${e.zone}` : ''}`);
+    if (r.id === 'alert') realFire(r, e);
+  };
+  frigate.on('event', (e) => engine.handle(e));
+  const steps = [{ type: 'wait', ms: 0 }];
+  config.routines = [
+    { id: 'anyone', enabled: true, name: 'Person anywhere', trigger: { source: 'camera', event: 'object', label: 'person' }, steps },
+    { id: 'porch', enabled: true, name: 'On the porch', trigger: { source: 'camera', event: 'object', camera: 'front', label: 'person', zone: 'porch' }, steps },
+    { id: 'gone', enabled: true, name: 'Car left', trigger: { source: 'camera', event: 'object.end', label: 'car' }, steps },
+    { id: 'alert', enabled: true, name: 'Snapshot', trigger: { source: 'camera', event: 'object', camera: 'front', minScore: 80 }, steps: [{ type: 'notify', title: '{{label}} at {{camera}}', message: 'Someone is here ({{score}}%)', snapshot: '' }] },
+  ];
+  const msg = (type, after) => mqtt.emit('event', { source: 'mqtt', topic: 'frigate/events', json: { type, after } });
+  const person = { id: 'ev1', camera: 'front_door', label: 'person', top_score: 0.86, entered_zones: [], false_positive: true };
+  msg('new', person); // not confirmed yet
+  assert.deepEqual(fired, []);
+  msg('update', { ...person, false_positive: false });
+  msg('update', { ...person, false_positive: false }); // a repeat doesn't fire again
+  msg('update', { ...person, false_positive: false, entered_zones: ['walkway'] });
+  msg('update', { ...person, false_positive: false, entered_zones: ['walkway', 'porch'] });
+  mqtt.emit('event', { source: 'mqtt', topic: 'zigbee2mqtt/x', json: { after: { id: 'zz', camera: 'front_door' } } }); // other topics ignored
+  msg('new', { id: 'ev2', camera: 'driveway', label: 'car', top_score: 0.7, entered_zones: [], false_positive: false });
+  msg('end', { id: 'ev2', camera: 'driveway', label: 'car' });
+  msg('end', { id: 'ev9', camera: 'driveway', label: 'car' }); // never confirmed, so no "left"
+  assert.deepEqual(fired, ['anyone:object', 'alert:object', 'porch:object:porch', 'gone:object.end']);
+  assert.equal(frigate.recent[0].label, 'car');
+
+  await sleep(150); // the phone alert with that detection's snapshot
+  assert.equal(pushes.length, 1);
+  assert.equal(pushes[0].method, 'PUT');
+  assert.equal(pushes[0].auth, 'Bearer tk');
+  assert.equal(pushes[0].filename, 'front_door.jpg');
+  assert.deepEqual(pushes[0].body, JPEG);
+  const q = new URL(pushes[0].url, 'http://x');
+  assert.equal(q.pathname, '/home');
+  assert.equal(q.searchParams.get('title'), 'person at front_door');
+  assert.equal(q.searchParams.get('message'), 'Someone is here (86%)');
+
+  // a snapshot that can't be fetched still sends the alert, without the picture
+  await engine.sendNtfy({ message: 'hi', snapshot: 'garage' }, {});
+  assert.equal(pushes[1].method, 'POST');
+  assert.match(log.warns.at(-1), /no snapshot .*HTTP 404/);
+
+  // the AI can look at a camera
+  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights: {}, frigate, log });
+  const out = await handleMcp({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'camera_snapshot', arguments: { camera: 'driveway' } } }, tools);
+  assert.equal(out.result.content[0].type, 'image');
+  assert.equal(out.result.content[0].mimeType, 'image/jpeg');
+  assert.deepEqual(Buffer.from(out.result.content[0].data, 'base64'), JPEG);
+
+  // a wrong password is a clear error
+  await assert.rejects(new Frigate(() => ({ frigate: { ...config.frigate, password: 'nope' } }), null, log).load(), /refused the username or password/);
+  await assert.rejects(new Frigate(() => ({ frigate: { url: config.frigate.url } }), null, log).load(), /wants a login/);
+
+  // validation
+  const w = { name: 'c', steps };
+  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'camera', event: 'motion' } }), /object or object.end/);
+  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'camera', event: 'object', minScore: 150 } }), /0-100/);
+  assert.equal(normalizeWorkflow({ ...w, trigger: { source: 'webhook', event: 'doorbell' }, steps: [{ type: 'notify', message: 'Ding', snapshot: true }] }).steps[0].snapshot, '');
 });

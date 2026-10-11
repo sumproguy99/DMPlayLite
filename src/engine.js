@@ -9,6 +9,7 @@
 //   webhook        event: <name>   (/hooks/<name>, Siri Shortcuts, IFTTT, Zapier, HA rest_command…)
 //   voice          event: alexa    device (exposed name contains)
 //   mode           event: mode.changed  to, from (house mode names)
+//   camera         event: object | object.end (Frigate)  camera, label (person, car… or a recognised name), zone, minScore
 //   weather        event: condition (to: clear|cloudy|fog|rain|snow|storm) | reading (reading, above|below) | alert | alert.ended (alert, severity)
 // Conditions: timeWindow {from,to} · dark · fullMoon · weather {condition | reading + above/below} · presence {device, state: home|away} · mode (name or list) · cooldownSec
 // Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click} · mode {mode}
@@ -53,10 +54,20 @@ function matchesWeather(t, e, { ignoreChange = false } = {}) {
   return (!t.alert || contains(e.alert, t.alert)) && severityAtLeast(e.severity, t.severity);
 }
 
+// Frigate detections. Without a zone filter only the first sighting counts (not every later zone it walks into).
+function matchesCamera(t, e) {
+  if (t.camera && !contains(e.camera, t.camera)) return false;
+  if (t.label && ![t.label].flat().some((l) => sameValue(e.label, l) || (e.subLabel && contains(e.subLabel, l)))) return false;
+  if (t.minScore && e.score < Number(t.minScore)) return false;
+  if (!t.zone) return e.type === 'object.end' || !e.zone;
+  return e.zone ? contains(e.zone, t.zone) : (e.zones ?? []).some((z) => contains(z, t.zone));
+}
+
 export function matchesTrigger(trigger, event, opts) {
   if (!trigger || trigger.source !== event.source || trigger.event !== event.type) return false;
   if (trigger.source === 'mqtt') return matchesMqtt(trigger, event, opts);
   if (trigger.source === 'weather') return matchesWeather(trigger, event, opts);
+  if (trigger.source === 'camera') return matchesCamera(trigger, event);
   if (trigger.player && !contains(event.player, trigger.player)) return false;
   if (trigger.user && !contains(event.user, trigger.user)) return false;
   if (trigger.mediaTypes?.length && event.mediaType && !trigger.mediaTypes.includes(event.mediaType)) return false;
@@ -110,6 +121,15 @@ export function ntfyRequest(step, settings = {}, event = {}) {
   return { url: server, init: { method: 'POST', headers, body: JSON.stringify(body) } };
 }
 
+// Same alert as a file upload: ntfy takes the picture as the body and everything else as query parameters.
+export function ntfyAttachment(url, init, image) {
+  const { topic, message, title, priority, tags, click } = JSON.parse(init.body);
+  const q = new URLSearchParams({ message, ...(title ? { title } : {}), ...(priority ? { priority: String(priority) } : {}), ...(tags?.length ? { tags: tags.join(',') } : {}), ...(click ? { click } : {}) });
+  const headers = { Filename: image.name.replace(/[^\w.-]/g, '_') };
+  if (init.headers.Authorization) headers.Authorization = init.headers.Authorization;
+  return { url: `${url}/${encodeURIComponent(topic)}?${q}`, init: { method: 'PUT', headers, body: image.data } };
+}
+
 const LIGHT_STEPS = new Set(['set', 'pulse']);
 
 // What a scene stores per light: off, or on with brightness and a white temperature or a color.
@@ -121,7 +141,7 @@ export class Engine {
   #modeChanges = []; // timestamps, to stop workflows flipping the mode back and forth forever
   #holds = new Map(); // routine|trigger|subject -> { timer, trigger, subject, name } for "for N minutes" triggers
 
-  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null, plex = null, roku = null, weather = null }) {
+  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null, plex = null, roku = null, weather = null, cameras = null }) {
     this.getConfig = getConfig;
     this.updateConfig = updateConfig;
     this.lights = lights;
@@ -132,6 +152,7 @@ export class Engine {
     this.plex = plex;
     this.roku = roku;
     this.weather = weather;
+    this.cameras = cameras;
   }
 
   // House mode: one current mode (home, away, movie…). Changing it fires { source: 'mode', type: 'mode.changed', from, to }.
@@ -158,7 +179,7 @@ export class Engine {
   }
 
   handle(event) {
-    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.source === 'hue' && (event.to ?? `button ${event.button ?? ''} ${event.press}`), event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`, event.source === 'weather' && (event.type === 'reading' ? `${event.reading} ${event.value}` : event.type === 'condition' ? `${event.from} → ${event.to}` : `${event.alert}${event.headline ? ` — ${event.headline}` : ''}`)]
+    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.source === 'hue' && (event.to ?? `button ${event.button ?? ''} ${event.press}`), event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`, event.source === 'camera' && `${event.subLabel ? `${event.subLabel} (${event.label})` : event.label} on ${event.camera}${event.zone ? ` → ${event.zone}` : ''} ${event.score}%`, event.source === 'weather' && (event.type === 'reading' ? `${event.reading} ${event.value}` : event.type === 'condition' ? `${event.from} → ${event.to}` : `${event.alert}${event.headline ? ` — ${event.headline}` : ''}`)]
       .filter(Boolean)
       .join(' ');
     // chatty sources (MQTT) can send many messages a second — log only the ones that start or end something
@@ -394,12 +415,25 @@ export class Engine {
 
   // Throws on failure — the Connections "Send test" button shows the error.
   async sendNtfy(step, event = {}) {
-    const { url, init } = ntfyRequest(step, this.getConfig().ntfy, event);
+    let { url, init } = ntfyRequest(step, this.getConfig().ntfy, event);
+    const { topic } = JSON.parse(init.body);
+    let attached = false;
+    if (step.snapshot != null && step.snapshot !== false) {
+      // a camera picture rides along as an attachment; if it can't be fetched the alert still goes out
+      try {
+        if (!this.cameras) throw new Error('cameras are not set up');
+        const image = await this.cameras.snapshot(typeof step.snapshot === 'string' ? template(step.snapshot, event) : step.snapshot, event);
+        ({ url, init } = ntfyAttachment(url, init, image));
+        attached = true;
+      } catch (err) {
+        this.log.warn(`Phone alert: no snapshot (${err.message})`);
+      }
+    }
     const res = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) }).catch((err) => {
       throw new Error(`can't reach ${url} (${err.cause?.code ?? err.message})`);
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}${res.status === 401 || res.status === 403 ? ' (check the access token)' : ''}`);
-    this.log.info(`Phone alert sent → ${JSON.parse(init.body).topic}`);
+    this.log.info(`Phone alert sent → ${topic}${attached ? ' with snapshot' : ''}`);
   }
 
   async #notify(step, event) {

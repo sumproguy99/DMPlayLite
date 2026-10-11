@@ -46,7 +46,7 @@ function send(res, status, body, headers = {}) {
 }
 
 export function createServer(app) {
-  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, wled, hueSensors, weather, alexa, assistant, tools, scheduler, auth } = app;
+  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, wled, hueSensors, weather, frigate, alexa, assistant, tools, scheduler, auth } = app;
   const { getConfig, updateConfig } = config;
   let plexServers = []; // from the last sign-in; tokens stay server-side
 
@@ -87,6 +87,7 @@ export function createServer(app) {
       location: c.location,
       sky: { sunrise: sun?.sunrise, sunset: sun?.sunset, moon: moonName(phase), moonPhase: phase },
       weather: weather?.summary() ?? null,
+      frigate: { url: c.frigate?.url ?? '', username: c.frigate?.username ?? '', hasPassword: Boolean(c.frigate?.password), topicPrefix: c.frigate?.topicPrefix || 'frigate', status: frigate?.status ?? {}, cameras: frigate?.cameras ?? [], recent: frigate?.recent ?? [] },
       network: { status: discovery.status, online: discovery.list().filter((d) => d.online).length, total: discovery.devices.size },
       urls: {
         ui: base.slice(0, 1),
@@ -382,6 +383,25 @@ export function createServer(app) {
       mqtt.restart();
       return { ok: true };
     },
+    'POST /api/frigate/settings': async (req) => {
+      const body = await readJson(req);
+      const url = String(body.url ?? '').trim().replace(/\/+$/, '');
+      if (url && !/^https?:\/\/[^\s/]+$/.test(url)) throw new HttpError(400, 'Frigate address must look like http://192.168.1.20:5000');
+      const next = { ...getConfig().frigate, url, username: String(body.username ?? '').trim(), topicPrefix: String(body.topicPrefix ?? '').trim() || 'frigate' };
+      if (body.password != null && body.password !== '') next.password = body.password;
+      if (!next.username) next.password = '';
+      let found = null;
+      if (url) {
+        try {
+          found = await frigate.load(next);
+        } catch (err) {
+          throw new HttpError(400, `Couldn't connect: ${err.message}`);
+        }
+      }
+      updateConfig((c) => (c.frigate = next));
+      await frigate.restart();
+      return { ok: true, ...found };
+    },
     'GET /api/mqtt/topics': (req, url) => mqtt.recent(url.searchParams.get('q') ?? '').slice(0, 300),
     'POST /api/ntfy/settings': async (req) => {
       const { server, topic, token } = await readJson(req);
@@ -536,6 +556,12 @@ export function createServer(app) {
       }
 
       if (p === '/api/log/stream') return streamLog(req, res);
+      if (p === '/api/frigate/snapshot') {
+        // live camera picture for the Connections card
+        const image = await frigate.snapshot(url.searchParams.get('camera') ?? '');
+        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store' });
+        return res.end(image.data);
+      }
       const handler = routes[`${req.method} ${p}`];
       if (handler) return send(res, 200, await handler(req, url, user, res));
       if (p.startsWith('/api/')) return send(res, 404, { error: 'Unknown endpoint' });

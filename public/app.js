@@ -11,6 +11,7 @@ const SOURCES = [
   { id: 'mode', icon: '🎭', name: 'House mode', blurb: 'Home, away, movie, sleep…' },
   { id: 'mqtt', icon: '📡', name: 'MQTT', blurb: 'Zigbee2MQTT, Tasmota, sensors…' },
   { id: 'weather', icon: '🌦', name: 'Weather', blurb: 'Rain, temperature, storm alerts' },
+  { id: 'camera', icon: '📷', name: 'Camera', blurb: 'Frigate: person, car, package seen' },
 ];
 const EVENTS = {
   plex: [
@@ -37,6 +38,7 @@ const EVENTS = {
   webhook: [],
   mode: [['mode.changed', 'House mode changes']],
   mqtt: [['message', 'A message arrives']],
+  camera: [['object', 'Something is seen'], ['object.end', 'It leaves / goes away']],
   weather: [
     ['condition', 'The sky changes (rain starts…)'],
     ['reading', 'Temperature / wind crosses a level'],
@@ -44,6 +46,7 @@ const EVENTS = {
     ['alert.ended', 'A weather alert ends (US)'],
   ],
 };
+const CAMERA_LABELS = ['person', 'car', 'dog', 'cat', 'package', 'bicycle', 'motorcycle', 'bird', 'face', 'license_plate'];
 const SKIES = [['clear', '☀️ Clear'], ['cloudy', '☁️ Cloudy'], ['fog', '🌫 Fog'], ['rain', '🌧 Rain (or storms)'], ['snow', '🌨 Snow'], ['storm', '⛈ Thunderstorm']];
 const SKY_ICON = { clear: '☀️', cloudy: '☁️', fog: '🌫', rain: '🌧', snow: '🌨', storm: '⛈' };
 const READINGS = [['temperature', 'Temperature'], ['feelsLike', 'Feels like'], ['humidity', 'Humidity'], ['wind', 'Wind speed'], ['gusts', 'Wind gusts']];
@@ -216,7 +219,7 @@ function describeStep(step) {
   if (step.type === 'roku') return `📺 Roku${step.device ? ` ${esc(step.device)}` : ''}: ${step.app ? `open <b>${esc(step.app)}</b>` : `<b>${esc(ROKU_KEYS.find(([k]) => k === step.key)?.[1] ?? step.key)}</b>`}`;
   if (step.type === 'scene') return `🎬 scene <b>${esc(step.scene)}</b>${step.transitionMs ? ` over ${sec(step.transitionMs)}s` : ''}`;
   if (step.type === 'capture') return `📸 save lights as scene <b>${esc(step.scene)}</b>${t}`;
-  if (step.type === 'notify') return `📲 “${esc(step.title ? `${step.title}: ${step.message}` : step.message)}”${step.topic ? ` → ${esc(step.topic)}` : ''}${step.priority >= 4 ? ' (high priority)' : ''}`;
+  if (step.type === 'notify') return `📲 “${esc(step.title ? `${step.title}: ${step.message}` : step.message)}”${step.topic ? ` → ${esc(step.topic)}` : ''}${step.priority >= 4 ? ' (high priority)' : ''}${step.snapshot != null && step.snapshot !== false ? ` + 📷 ${step.snapshot ? esc(step.snapshot.replace(/\/\/[^@/]*@/, '//')) : 'snapshot'}` : ''}`;
   if (step.type === 'pulse') return `✨ pulse ${step.levels.join('→')}% ×${step.times} (${sec(step.stepMs)}s/step)${step.restore ? ', then restore' : ''}${t}`;
   const parts = [];
   if (step.on === false || step.brightness === 0) parts.push('off');
@@ -235,6 +238,7 @@ function describeTrigger(tr) {
   else if (tr.source === 'time') text = `${b(tr.event === 'sun.sunset' ? 'sunset' : 'sunrise')}${tr.offsetMin ? ` ${tr.offsetMin > 0 ? '+' : '−'}${Math.abs(tr.offsetMin)} min` : ''}`;
   else if (tr.source === 'hue') text = `${b(tr.device || 'any Hue sensor')} ${tr.event === 'button' ? `${HUE_PRESSES.find(([k]) => k === (tr.press ?? 'short_release'))?.[1].toLowerCase() ?? esc(tr.press)}${tr.button ? ` on button ${b(tr.button)}` : ''}` : tr.event === 'motion' ? (tr.to === 'clear' ? 'motion clears' : tr.to === 'detected' ? 'detects motion' : 'motion changes') : tr.to ? `is ${b(tr.to)}` : 'opens or closes'}`;
   else if (tr.source === 'mqtt') text = `MQTT ${b(tr.topic || 'any topic')}${tr.field ? ` — ${b(tr.field)} changes${tr.value != null && tr.value !== '' ? ` to ${b(tr.value)}` : ''}` : tr.payload ? ` says ${b(tr.payload)}` : ''}`;
+  else if (tr.source === 'camera') text = `${b(tr.label || 'anything')} ${tr.event === 'object.end' ? 'leaves' : 'is seen'} on ${b(tr.camera || 'any camera')}${tr.zone ? ` in ${b(tr.zone)}` : ''}${tr.minScore ? ` (${tr.minScore}%+ sure)` : ''}`;
   else if (tr.source === 'weather') {
     if (tr.event === 'condition') text = tr.to ? `it starts to ${b(tr.to === 'clear' ? 'clear up' : tr.to === 'cloudy' ? 'cloud over' : tr.to === 'storm' ? 'storm' : tr.to)}` : 'the weather changes';
     else if (tr.event === 'reading') text = `the ${b(readingText(tr, true))}`;
@@ -453,6 +457,25 @@ function sourceFields(tr, base) {
       <p class="small muted" style="margin:6px 0 0">${tr.field ? 'Fires when that field changes — not on every repeat of the same value.' : 'Leave the JSON field empty to match the whole message (Tasmota “ON”, rtl_433 lines…).'} Use {{topic}}, {{payload}}, {{json.<i>field</i>}} in later steps.</p>
       ${S.state.mqtt?.status.connected ? '' : '<p class="small muted">Connect MQTT under Connections first.</p>'}`;
   }
+  if (tr.source === 'camera') {
+    const fr = S.state.frigate ?? {};
+    const cam = fr.cameras?.find((c) => tr.camera && c.name.toLowerCase().includes(tr.camera.toLowerCase()));
+    const zones = [...new Set((cam ? [cam] : fr.cameras ?? []).flatMap((c) => c.zones))];
+    const note = !fr.url ? 'Add Frigate under Connections → Cameras first.'
+      : !S.state.mqtt?.status.connected ? 'Detections arrive over MQTT — connect Playlite to the same broker as Frigate under Connections → MQTT.'
+      : `Fires once when Frigate is sure${tr.zone ? ', and when it walks into that zone' : ''}. Use {{camera}}, {{label}}, {{zone}} in a phone alert, and tick “Attach a camera picture”.`;
+    return `<div class="fields">${eventSelect}
+      <label class="field">What<input type="text" data-bind="${base}.label" value="${esc(tr.label)}" placeholder="anything" list="camlabels"></label>
+      <datalist id="camlabels">${CAMERA_LABELS.map((l) => `<option value="${l}">`).join('')}</datalist></div>
+      <div class="fields" style="margin-top:10px">
+      <label class="field grow">Camera (name contains)<input type="text" data-bind="${base}.camera" value="${esc(tr.camera)}" placeholder="any camera" list="cameras" data-rerender-blur></label>
+      <datalist id="cameras">${(fr.cameras ?? []).map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>
+      <label class="field">In zone <small>(optional)</small><input type="text" data-bind="${base}.zone" value="${esc(tr.zone)}" placeholder="anywhere" list="camzones"></label>
+      <datalist id="camzones">${zones.map((z) => `<option value="${esc(z)}">`).join('')}</datalist>
+      <label class="field">At least <small>(% sure)</small><input type="number" min="0" max="100" data-bind="${base}.minScore" data-type="num" value="${tr.minScore ?? ''}" placeholder="any"></label>
+      </div>
+      <p class="small muted" style="margin:6px 0 0">${note}</p>`;
+  }
   if (tr.source === 'weather') {
     const w = S.state.weather;
     const opt = (v, label, cur) => `<option value="${v}" ${(cur ?? '') === v ? 'selected' : ''}>${label}</option>`;
@@ -597,6 +620,11 @@ function stepEditor(step, i) {
           <label class="field grow">Tags / emoji<input type="text" data-bind="${p}.tags" value="${esc(Array.isArray(step.tags) ? step.tags.join(', ') : step.tags)}" placeholder="movie_camera, warning"></label>
           <label class="field grow">Open link when tapped<input type="text" data-bind="${p}.click" value="${esc(step.click)}" placeholder="https://…"></label>
         </div></details>
+      <div class="fields">
+        <label class="row small"><input type="checkbox" data-snap="${i}" ${step.snapshot != null && step.snapshot !== false ? 'checked' : ''}> 📷 Attach a camera picture</label>
+        ${step.snapshot != null && step.snapshot !== false ? `<label class="field grow">From <small>(camera name or snapshot URL)</small><input type="text" data-bind="${p}.snapshot" value="${esc(step.snapshot === true ? '' : step.snapshot)}" placeholder="the camera that triggered it" list="cameras2"></label>
+        <datalist id="cameras2">${(S.state.frigate?.cameras ?? []).map((c) => `<option value="${esc(c.name)}">`).join('')}</datalist>` : ''}
+      </div>
       <p class="muted small" style="margin:0">Use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} to insert details from the trigger.${topicSet ? '' : ' <span style="color:var(--warn)">Set up Phone alerts under Connections first.</span>'}</p>`;
   }
   const custom = ['set', 'pulse', 'capture'].includes(step.type) && step.targets?.length;
@@ -810,6 +838,7 @@ function wireEditor() {
     if (src === 'time') t.at = '18:00';
     if (src === 'hue') t.to = 'detected';
     if (src === 'weather') t.to = 'rain';
+    if (src === 'camera') t.label = 'person';
     if (src === 'network' && !S.network.length) refreshNetwork().then(renderEditor).catch(() => {});
     return t;
   };
@@ -860,6 +889,12 @@ function wireEditor() {
     delete s.color;
     if (el.value === 'kelvin') s.kelvin = 4000;
     if (el.value === 'color') s.color = '#ff8a3d';
+    renderEditor();
+  }));
+  dlg.querySelectorAll('[data-snap]').forEach((el) => (el.onchange = () => {
+    const st = draft.steps[+el.dataset.snap];
+    if (el.checked) st.snapshot = '';
+    else delete st.snapshot;
     renderEditor();
   }));
   dlg.querySelectorAll('[data-rokumode]').forEach((el) => (el.onchange = () => {
@@ -1167,7 +1202,7 @@ function statusPill(ok, text, bad = false) {
 
 function renderConnections() {
   const el = $('#tab-connections');
-  const { plex, hue, govee, wled, urls, homeassistant: ha, alexa, ai, ntfy, mqtt, location: loc, sky, weather: wx } = S.state;
+  const { plex, hue, govee, wled, urls, homeassistant: ha, alexa, ai, ntfy, mqtt, location: loc, sky, weather: wx, frigate: fr } = S.state;
   const ntfyWeb = `${(ntfy.server || 'https://ntfy.sh').replace(/\/+$/, '')}/${encodeURIComponent(ntfy.topic || '')}`;
   const alexaOk = alexa.status.http === 'listening';
   el.innerHTML = `
@@ -1274,6 +1309,22 @@ function renderConnections() {
         </div>
         ${mqtt.status.connected ? '<details id="mqtt-browse"><summary class="small muted">Recent topics</summary><div id="mqtt-topics" class="small" style="margin-top:8px">Loading…</div></details>' : ''}
         <p class="small muted" style="margin:0">Use <code>mqtts://</code> for TLS. Leave the broker empty to turn MQTT off.</p>
+      </div>
+
+      <div class="card stack">
+        <div class="row spread"><h2>📷 Cameras (Frigate)</h2>${statusPill(fr.status?.connected, fr.status?.connected ? `Connected · ${fr.cameras.length} camera${fr.cameras.length === 1 ? '' : 's'}` : fr.url ? esc(fr.status?.lastError ?? 'Connecting…') : 'Not set up', Boolean(fr.url && !fr.status?.connected))}</div>
+        <p class="small muted" style="margin:0">Connect <b>Frigate NVR</b> to use “a person / car / package is seen” (by camera and zone) as a trigger and to put camera pictures in phone alerts. Detections come over MQTT, so Playlite and Frigate need the same broker.</p>
+        <div class="fields">
+          <label class="field grow">Frigate address<input type="text" id="fr-url" value="${esc(fr.url)}" placeholder="http://192.168.1.20:5000"></label>
+          <label class="field">Username<input type="text" id="fr-user" value="${esc(fr.username)}" placeholder="only for port 8971" autocomplete="off"></label>
+          <label class="field">Password<input type="password" id="fr-pass" placeholder="${fr.hasPassword ? '•••••• (saved)' : 'optional'}" autocomplete="new-password"></label>
+          <button class="btn primary" id="fr-save">Test &amp; save</button>
+        </div>
+        ${fr.url && !mqtt.status.connected ? '<p class="small" style="color:var(--warn);margin:0">Connect MQTT (above) to the broker Frigate uses — that’s how detections arrive.</p>' : ''}
+        ${fr.status?.connected && fr.cameras.length ? `<details id="fr-cams"><summary class="small muted">Cameras: ${fr.cameras.map((c) => esc(c.name)).join(', ')}</summary>
+          <div class="cam-grid">${fr.cameras.map((c) => `<figure><img loading="lazy" alt="${esc(c.name)}" src="/api/frigate/snapshot?camera=${encodeURIComponent(c.name)}&t=${Date.now()}"><figcaption class="small"><b>${esc(c.name)}</b>${c.zones.length ? ` <span class="muted">zones: ${c.zones.map(esc).join(', ')}</span>` : ''}</figcaption></figure>`).join('')}</div></details>` : ''}
+        ${fr.recent?.length ? `<div class="small"><span class="muted">Recently seen:</span> ${fr.recent.slice(0, 6).map((d) => `${esc(d.subLabel || d.label)} on ${esc(d.camera)} <span class="muted">${timeOf(d.at)}</span>`).join(' · ')}</div>` : ''}
+        <details><summary class="small muted">Topic prefix</summary><div class="fields" style="margin-top:8px"><label class="field">Frigate MQTT topic prefix<input type="text" id="fr-prefix" value="${esc(fr.topicPrefix)}" placeholder="frigate"></label></div></details>
       </div>
 
       <div class="card stack">
@@ -1406,6 +1457,13 @@ function renderConnections() {
     toast(body.url ? 'MQTT connected' : 'MQTT turned off');
     S.mqttTopics = null;
     setTimeout(refresh, 600);
+  }));
+  $('#fr-save').onclick = guard(async (e) => busy(e.target, 'Connecting…', async () => {
+    const body = { url: $('#fr-url').value.trim(), username: $('#fr-user').value.trim(), topicPrefix: $('#fr-prefix').value.trim() };
+    if ($('#fr-pass').value) body.password = $('#fr-pass').value;
+    const res = await api('POST', '/api/frigate/settings', body);
+    toast(body.url ? `Frigate connected — ${res.cameras.length} camera${res.cameras.length === 1 ? '' : 's'}` : 'Frigate turned off');
+    await refresh();
   }));
   $('#mqtt-browse')?.addEventListener('toggle', guard(async (e) => {
     if (!e.target.open) return;
@@ -1590,7 +1648,7 @@ if (saved && saved !== 'routines' && document.getElementById(`tab-${saved}`)) sh
 
 setInterval(() => api('GET', '/api/state').then((s) => {
   const waitingChanged = JSON.stringify(s.waiting) !== JSON.stringify(S.state.waiting);
-  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky, weather: s.weather });
+  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky, weather: s.weather, frigate: s.frigate });
   renderHeader();
   if (waitingChanged && !$('#idea')?.value) renderRoutines(); // don't wipe an idea being typed
 }).catch(() => {}), 10_000);

@@ -62,7 +62,11 @@ export class Assistant {
         try {
           const out = await onTool(use.name, use.input);
           if (out?.stop) stop = out;
-          results.push({ type: 'tool_result', tool_use_id: use.id, content: JSON.stringify(out?.result ?? out ?? null).slice(0, 20_000) });
+          const { image, ...rest } = out?.result ?? out ?? {};
+          const json = JSON.stringify(out?.result ?? out ?? null).slice(0, 20_000);
+          // a camera snapshot goes to Claude as a real image it can look at
+          const content = image ? [{ type: 'image', source: { type: 'base64', media_type: image.mimeType, data: image.data } }, { type: 'text', text: JSON.stringify(rest) }] : json;
+          results.push({ type: 'tool_result', tool_use_id: use.id, content });
         } catch (err) {
           results.push({ type: 'tool_result', tool_use_id: use.id, content: `Error: ${err.message}`, is_error: true });
         }

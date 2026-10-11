@@ -34,6 +34,11 @@ TRIGGERS (source → event → optional filters):
   OR "field" (JSON key, dots for nesting) with optional "value" — a field trigger fires when that field CHANGES (to "value").
   Zigbee2MQTT motion: {"source":"mqtt","event":"message","topic":"zigbee2mqtt/Hall motion","field":"occupancy","value":"true"}
   No motion for 10 min: same with "value":"false","forMin":10. Templates: {{topic}}, {{payload}}, {{json.temperature}}.
+- camera (Frigate NVR, see list_cameras) → object (Frigate confirmed a person/car/dog/cat/package… — once per sighting, and again when it
+  walks into a new zone) | object.end (it left / the event ended). Filters: "camera" (name contains), "label" ("person", "car", or a name
+  Frigate recognised, e.g. a face), "zone" (only when it is in / enters that zone, e.g. "porch"), "minScore" (0-100 confidence).
+  Person at the front door after dark: trigger {"source":"camera","event":"object","camera":"front","label":"person","zone":"porch"},
+  conditions {"dark":true}. Templates: {{camera}}, {{label}}, {{subLabel}}, {{zone}}, {{score}}.
 - weather (uses the location from Connections; checked every 10 min) →
   condition: the sky changes; "to": clear|cloudy|fog|rain|snow|storm (rain includes storms). Rain starts: {"source":"weather","event":"condition","to":"rain"}
   reading: "reading": temperature|feelsLike|humidity|wind|gusts with "below" and/or "above" — fires when it CROSSES that level
@@ -57,6 +62,8 @@ STEPS:
 - {"type":"http","method":"POST","url":"https://…","body":{…}}   (strings may use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} from the event)
 - {"type":"ha","service":"switch.turn_on","data":{"entity_id":"switch.fan"}}
 - {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy; optional "topic" overrides the default set under Connections; priority 1-5, 5 = urgent)
+  Add "snapshot": "" to attach the picture from the camera that triggered the workflow, "snapshot": "driveway" for that Frigate camera's
+  live frame, or "snapshot": "http://user:pass@192.168.1.50/snap.jpg" for any camera's snapshot URL. Doorbell press → snapshot of the porch.
 - {"type":"mode","mode":"movie"}   (switch the house mode; this can trigger other workflows)
 - {"type":"plex","action":"pause","player":"Living Room"}   (actions: pause, play, toggle, stop, next, previous, forward, back;
   leave "player" out to control the Plex player that triggered the workflow, or else the one that's playing. E.g. doorbell → pause the movie)
@@ -95,6 +102,10 @@ export function normalizeWorkflow(w) {
   for (const t of [w.trigger, ...(w.orTriggers ?? [])]) {
     if (t.source === 'hue' && t.event === 'button') t.press ||= 'short_release'; // one press = one run
     if (t.source === 'weather') checkWeatherTrigger(t);
+    if (t.source === 'camera') {
+      if (!['object', 'object.end'].includes(t.event)) throw new Error('camera trigger event must be object or object.end');
+      if (t.minScore != null && t.minScore !== '' && !(Number(t.minScore) >= 0 && Number(t.minScore) <= 100)) throw new Error('minScore must be 0-100');
+    }
     if (t.forMin == null || t.forMin === '' || t.forMin === 0) {
       delete t.forMin;
       continue;
@@ -132,13 +143,14 @@ export function normalizeWorkflow(w) {
       if (!String(s.message ?? '').trim()) throw new Error('notify step needs a message');
       if (s.priority != null && s.priority !== '' && !(Number.isInteger(+s.priority) && +s.priority >= 1 && +s.priority <= 5)) throw new Error('notify priority must be 1-5');
       if (s.click && !/^https?:\/\//.test(s.click)) throw new Error('notify click link needs a full http(s) URL');
+      if (s.snapshot === true) s.snapshot = '';
     }
   }
   return { id: w.id || randomId(4), enabled: w.enabled ?? true, targets: w.targets ?? [], ...w };
 }
 
 export function createTools(ctx) {
-  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, weather, log } = ctx;
+  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, weather, frigate, log } = ctx;
   const findRoutine = (q) => {
     const rs = getConfig().routines;
     const s = String(q ?? '').toLowerCase();
@@ -270,6 +282,25 @@ export function createTools(ctx) {
       description: 'Set the lights back to a saved scene, optionally fading over transitionMs.',
       inputSchema: { type: 'object', properties: { scene: { type: 'string' }, transitionMs: { type: 'number' } }, required: ['scene'], additionalProperties: false },
       run: async (a) => ({ ok: true, scene: (await engine.applyScene(a.scene, a.transitionMs ?? 0)).name }),
+    },
+    {
+      name: 'list_cameras',
+      description: 'Frigate cameras with their zones (for camera triggers and snapshots) and the most recent detections (who/what was seen where).',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: async () => {
+        if (!frigate || !getConfig().frigate?.url) throw new Error('Frigate is not set up — add it under Connections → Cameras');
+        return { status: frigate.status, cameras: frigate.cameras, recent: frigate.recent };
+      },
+    },
+    {
+      name: 'camera_snapshot',
+      description: 'Look at a Frigate camera right now: returns its current picture (to check the driveway, the garage door, a package on the porch…).',
+      inputSchema: { type: 'object', properties: { camera: { type: 'string', description: 'camera name from list_cameras' } }, required: ['camera'], additionalProperties: false },
+      run: async (a) => {
+        if (!frigate) throw new Error('Frigate is not set up');
+        const shot = await frigate.snapshot(a.camera);
+        return { camera: a.camera, at: new Date().toISOString(), image: { data: shot.data.toString('base64'), mimeType: 'image/jpeg' } };
+      },
     },
     {
       name: 'get_weather',

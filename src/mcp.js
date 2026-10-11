@@ -21,7 +21,7 @@ export async function handleMcp(message, tools) {
         protocolVersion: VERSIONS.includes(params?.protocolVersion) ? params.protocolVersion : VERSIONS[0],
         capabilities: { tools: { listChanged: false } },
         serverInfo: { name: 'playlite', version: '0.2.0' },
-        instructions: 'Playlite is a home automation hub (lights, Plex, network presence, Home Assistant). Use list_lights and list_workflows before changing things.',
+        instructions: 'Playlite is a home automation hub (lights, Plex, network presence, Home Assistant, cameras, weather). Use list_lights and list_workflows before changing things.',
       });
     case 'ping':
       return reply({});
@@ -30,6 +30,10 @@ export async function handleMcp(message, tools) {
     case 'tools/call':
       try {
         const result = await callTool(tools, params?.name, params?.arguments);
+        if (result?.image) {
+          const { image, ...rest } = result;
+          return reply({ content: [{ type: 'image', data: image.data, mimeType: image.mimeType }, { type: 'text', text: JSON.stringify(rest, null, 1) }] });
+        }
         return reply({ content: [{ type: 'text', text: JSON.stringify(result, null, 1) }] });
       } catch (err) {
         return reply({ content: [{ type: 'text', text: `Error: ${err.message}` }], isError: true });

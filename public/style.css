@@ -205,3 +205,7 @@ pre.code { background: var(--bg); border: 1px solid var(--border); border-radius
 }
 .card.stack { align-content: start; }
 .mqtt-row { padding: 3px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }
+
+.cam-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 10px; margin-top: 8px; }
+.cam-grid figure { margin: 0; }
+.cam-grid img { width: 100%; aspect-ratio: 16 / 9; object-fit: cover; border-radius: 8px; background: var(--panel-2); display: block; }

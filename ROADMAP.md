@@ -184,12 +184,12 @@ door closes → resume and dim back.**
 
 | Integration | How | Effort |
 |---|---|---|
-| **Frigate** — person/car/package detection (local AI) | MQTT events + snapshots | 🟡 Local |
+| ✅ **Frigate** — person/car/package detection (local AI) | MQTT events + snapshots | 🟡 Local |
 | ONVIF cameras — motion events | ONVIF pull-point | 🟡 Local |
 | Reolink / Amcrest / Hikvision | local HTTP APIs | 🟡 Local |
 | UniFi Protect | websocket API | 🟡 Local |
 | Doorbells (Reolink, UniFi, Ring via HA) | as above | 🟡 |
-| Snapshot attached to phone notifications | RTSP/HTTP snapshot → ntfy/Telegram | 🟢 |
+| ✅ Snapshot attached to phone notifications | Frigate or any HTTP snapshot URL → ntfy | 🟢 |
 
 Ideas: person in driveway after dark → porch lights 100% for 5 min · package detected → blue pulse on living-room lights.
 
@@ -242,7 +242,7 @@ Ideas: person in driveway after dark → porch lights 100% for 5 min · package 
 **Phase 3 — Awareness**
 9. Presence: router (OpenWrt/UniFi) + iOS Shortcuts/OwnTracks helpers
 10. ✅ Weather + NWS severe alerts (forecast triggers, air quality still to do)
-11. Cameras/doorbells (Frigate/ONVIF) with snapshots
+11. ✅ Cameras: Frigate detections + snapshots in phone alerts (ONVIF / UniFi Protect / Reolink events still to do)
 
 **Phase 4 — Polish & voice**
 12. PWA mobile app with widgets

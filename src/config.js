@@ -73,6 +73,7 @@ function defaults() {
     mqtt: { url: '', username: '', password: '' },
     location: { lat: null, lon: null, name: '' },
     weather: { enabled: true, units: 'f', alerts: true },
+    frigate: { url: '', username: '', password: '', topicPrefix: 'frigate' },
     mode: 'home',
     modes: ['home', 'away', 'movie', 'sleep', 'guest'],
     scenes: [],
@@ -92,7 +93,7 @@ export function loadConfig() {
     const stored = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     const base = defaults();
     current = { ...base, ...stored };
-    for (const key of ['plex', 'hue', 'govee', 'wled', 'homeassistant', 'alexa', 'ai', 'ntfy', 'mqtt', 'location', 'weather']) {
+    for (const key of ['plex', 'hue', 'govee', 'wled', 'homeassistant', 'alexa', 'ai', 'ntfy', 'mqtt', 'location', 'weather', 'frigate']) {
       current[key] = { ...base[key], ...stored[key] };
     }
   } else {
