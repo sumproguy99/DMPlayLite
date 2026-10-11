@@ -14,6 +14,9 @@ import { classify, vendorFor, pickName } from '../src/discovery.js';
 import { encodeQuery, decodePacket } from '../src/dns.js';
 import { Mqtt, topicMatches, parsePackets, publishPacket, decodePublish } from '../src/integrations/mqtt.js';
 import { startBroker } from './mini-broker.js';
+import { WledDriver } from '../src/integrations/wled.js';
+import { HueSensors } from '../src/integrations/huesensors.js';
+import http from 'node:http';
 
 test('sunrise/sunset are plausible (Nashville, June 21)', () => {
   const { sunrise, sunset } = sunTimes(new Date('2026-06-21T12:00:00-05:00'), 36.16, -86.78);
@@ -446,4 +449,111 @@ test('mqtt: client auth, events, retained skipped, QoS1 ack, publish, triggers',
   assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'webhook', event: 'x' }, steps: [{ type: 'mqtt', topic: 'a/+' }] }), /plain topic/);
   const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights: null, discovery: null, ha: null, mqtt, log });
   assert.ok((await tools.find((t) => t.name === 'mqtt_topics').run({ query: 'plug' })).some((t) => t.topic === 'stat/plug/POWER'));
+});
+
+const listen = (handler) => new Promise((resolve) => {
+  const server = http.createServer(handler);
+  server.listen(0, '127.0.0.1', () => resolve(server));
+});
+const readBody = (req) => new Promise((r) => {
+  let b = '';
+  req.on('data', (c) => (b += c)).on('end', () => r(b ? JSON.parse(b) : null));
+});
+
+test('wled: add by IP, state read-back, apply brightness / white / color / off', async (t) => {
+  const state = { on: true, bri: 128, seg: [{ col: [[255, 0, 0], [0, 0, 0]] }] };
+  const posts = [];
+  const server = await listen(async (req, res) => {
+    if (req.url === '/json/info') return res.end(JSON.stringify({ ver: '0.15.0', name: 'Shelf', mac: 'aa:bb:cc:dd:ee:ff', leds: { count: 60 } }));
+    if (req.url === '/json/state' && req.method === 'POST') {
+      posts.push(await readBody(req));
+      return res.end('{"success":true}');
+    }
+    if (req.url === '/json/state') return res.end(JSON.stringify(state));
+    res.writeHead(404).end();
+  });
+  t.after(() => server.close());
+  const ip = `127.0.0.1:${server.address().port}`;
+  const config = { wled: { devices: {} } };
+  const wled = new WledDriver(() => config, (fn) => fn(config), { info() {} });
+  assert.equal(await wled.add(ip), 'aabbccddeeff');
+  assert.deepEqual(await wled.list(), [{ id: 'wled:aabbccddeeff', name: 'Shelf', kind: 'wled', ip }]);
+  assert.deepEqual(await wled.getState('aabbccddeeff'), { on: true, brightness: 50, color: '#ff0000' });
+  await wled.apply('aabbccddeeff', { brightness: 40 }, 2500);
+  await wled.apply('aabbccddeeff', { brightness: 100, kelvin: 2700 });
+  await wled.apply('aabbccddeeff', { color: '#00ff80' });
+  await wled.apply('aabbccddeeff', { on: false }, 1000);
+  assert.deepEqual(posts, [
+    { transition: 25, on: true, bri: 102 },
+    { transition: 0, on: true, bri: 255, seg: { col: [[255, 167, 87]], fx: 0, cct: 2700 } },
+    { transition: 0, seg: { col: [[0, 255, 128]], fx: 0 } },
+    { transition: 10, on: false },
+  ]);
+  await assert.rejects(wled.add('127.0.0.1:1'), /No WLED device answered/);
+  await assert.rejects(wled.add('http://x/y'), /IP address/);
+});
+
+test('hue sensors: v2 event stream → motion / button / contact events', async (t) => {
+  let stream;
+  const server = await listen((req, res) => {
+    if (req.headers['hue-application-key'] !== 'user1') return res.writeHead(403).end();
+    if (req.url === '/clip/v2/resource/device') return res.end(JSON.stringify({ data: [
+      { metadata: { name: 'Hall sensor' }, services: [{ rid: 'm1', rtype: 'motion' }, { rid: 'x', rtype: 'temperature' }] },
+      { metadata: { name: 'Bedroom dimmer' }, services: [{ rid: 'b1', rtype: 'button' }, { rid: 'b4', rtype: 'button' }] },
+      { metadata: { name: 'Front door' }, services: [{ rid: 'c1', rtype: 'contact' }] },
+    ] }));
+    if (req.url === '/clip/v2/resource/button') return res.end(JSON.stringify({ data: [{ id: 'b1', metadata: { control_id: 1 } }, { id: 'b4', metadata: { control_id: 4 } }] }));
+    if (req.url === '/eventstream/clip/v2') {
+      res.writeHead(200, { 'Content-Type': 'text/event-stream' });
+      res.write(': hi\n\n');
+      stream = res;
+      return;
+    }
+    res.writeHead(404).end();
+  });
+  t.after(() => server.close());
+  const config = { hue: { bridgeIp: 'x', username: 'user1' }, routines: [], groups: [] };
+  const log = { entries: [], info() {}, warn() {}, error() {}, event() {} };
+  const sensors = new HueSensors(() => config, log);
+  sensors.baseUrl = `http://127.0.0.1:${server.address().port}`;
+  t.after(() => sensors.stop());
+  const events = [];
+  sensors.on('event', (e) => events.push(e));
+  sensors.restart();
+  for (let i = 0; i < 50 && !stream; i++) await sleep(20);
+  assert.equal(sensors.status.connected, true);
+  assert.deepEqual(sensors.sensors(), [{ name: 'Hall sensor', kinds: ['motion'] }, { name: 'Bedroom dimmer', kinds: ['button'] }, { name: 'Front door', kinds: ['contact'] }]);
+
+  const send = (data) => stream.write(`id: 1\ndata: ${JSON.stringify([{ type: 'update', data }])}\n\n`);
+  send([{ id: 'm1', type: 'motion', motion: { motion: true, motion_report: { motion: true } } }, { id: 'zz', type: 'light', on: { on: true } }]);
+  send([{ id: 'b4', type: 'button', button: { button_report: { event: 'long_press' } } }]);
+  // an event split across two chunks
+  const whole = `data: ${JSON.stringify([{ type: 'update', data: [{ id: 'c1', type: 'contact', contact_report: { state: 'no_contact' } }] }])}\n\n`;
+  stream.write(whole.slice(0, 30));
+  await sleep(20);
+  stream.write(whole.slice(30));
+  send([{ id: 'm1', type: 'motion', motion: { motion_report: { motion: false } } }]);
+  for (let i = 0; i < 50 && events.length < 4; i++) await sleep(20);
+  assert.deepEqual(events.map(({ type, device, to, button, press }) => ({ type, device, to, button, press })), [
+    { type: 'motion', device: 'Hall sensor', to: 'detected', button: undefined, press: undefined },
+    { type: 'button', device: 'Bedroom dimmer', to: undefined, button: 4, press: 'long_press' },
+    { type: 'contact', device: 'Front door', to: 'open', button: undefined, press: undefined },
+    { type: 'motion', device: 'Hall sensor', to: 'clear', button: undefined, press: undefined },
+  ]);
+
+  // triggers
+  const btn = { source: 'hue', event: 'button', device: 'dimmer', button: 4, press: 'long_press' };
+  assert.ok(matchesTrigger(btn, events[1]));
+  assert.ok(!matchesTrigger({ ...btn, button: 1 }, events[1]));
+  assert.ok(!matchesTrigger({ ...btn, press: 'short_release' }, events[1]));
+  assert.ok(matchesTrigger({ source: 'hue', event: 'motion', device: 'hall', to: 'clear' }, events[3]));
+  assert.equal(normalizeWorkflow({ name: 'a', trigger: { source: 'hue', event: 'button' }, steps: [{ type: 'wait' }] }).trigger.press, 'short_release');
+  assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'hue', event: 'button', forMin: 2 }, steps: [{ type: 'wait' }] }), /only works with/);
+  assert.equal(normalizeWorkflow({ name: 'a', trigger: { source: 'hue', event: 'motion', to: 'clear', forMin: 10 }, steps: [{ type: 'wait' }] }).trigger.forMin, 10);
+
+  // wrong key → clear error, no crash
+  config.hue.username = 'nope';
+  sensors.restart();
+  for (let i = 0; i < 50 && !sensors.status.lastError; i++) await sleep(20);
+  assert.match(sensors.status.lastError, /pair it again/);
 });

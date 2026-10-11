@@ -24,11 +24,14 @@ TRIGGERS (source → event → optional filters):
 - webhook → any name, fired by GET/POST /hooks/<name>?key=… (Siri Shortcuts, IFTTT, Zapier, Home Assistant).
 - voice → alexa. Filter: device (spoken device name).
 - mode → mode.changed (the house mode was switched). Filters: to, from (mode names, see get_mode).
+- hue → motion (filter "to": "detected"|"clear") | contact (Hue door/window sensor, "to": "open"|"closed") |
+  button (Hue dimmer/smart button/tap switch; "button": 1-4, "press": "short_release"|"long_press"|"repeat"|"long_release"|"initial_press").
+  Filter "device" = sensor name contains. No motion for 10 min: {"source":"hue","event":"motion","device":"Hall","to":"clear","forMin":10}.
 - mqtt → message. "topic" (MQTT wildcards + and # allowed, see mqtt_topics) and EITHER "payload" (whole message equals, e.g. "ON")
   OR "field" (JSON key, dots for nesting) with optional "value" — a field trigger fires when that field CHANGES (to "value").
   Zigbee2MQTT motion: {"source":"mqtt","event":"message","topic":"zigbee2mqtt/Hall motion","field":"occupancy","value":"true"}
   No motion for 10 min: same with "value":"false","forMin":10. Templates: {{topic}}, {{payload}}, {{json.temperature}}.
-"forMin": N on a plex, network, homeassistant, mode or mqtt trigger = only if it STAYS that way for N minutes
+"forMin": N on a plex, network, homeassistant, mode, mqtt or hue motion/contact trigger = only if it STAYS that way for N minutes
   (e.g. door open 10 min: {"source":"homeassistant","event":"state","entity":"front_door","to":"on","forMin":10};
   phone gone 30 min: {"source":"network","event":"device.offline","device":"iPhone","forMin":30}). Waits reset on restart.
 CONDITIONS: timeWindow {"from":"HH:MM","to":"HH:MM"} · dark: true (after sunset/before sunrise) · light: true · fullMoon: true ·
@@ -58,6 +61,7 @@ export function normalizeWorkflow(w) {
   if (w.orTriggers && !w.orTriggers.length) delete w.orTriggers;
   if ([w.trigger, ...(w.orTriggers ?? [])].some((t) => t.source === 'mqtt' && !String(t.topic ?? '').trim())) throw new Error('MQTT trigger needs a topic');
   for (const t of [w.trigger, ...(w.orTriggers ?? [])]) {
+    if (t.source === 'hue' && t.event === 'button') t.press ||= 'short_release'; // one press = one run
     if (t.forMin == null || t.forMin === '' || t.forMin === 0) {
       delete t.forMin;
       continue;
@@ -94,7 +98,7 @@ export function normalizeWorkflow(w) {
 }
 
 export function createTools(ctx) {
-  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, log } = ctx;
+  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, log } = ctx;
   const findRoutine = (q) => {
     const rs = getConfig().routines;
     const s = String(q ?? '').toLowerCase();
@@ -104,7 +108,7 @@ export function createTools(ctx) {
   const tools = [
     {
       name: 'list_lights',
-      description: 'List every controllable light (Hue, Govee, Home Assistant) and every Playlite group, with the ids to use as targets.',
+      description: 'List every controllable light (Hue, Govee, WLED, Home Assistant) and every Playlite group, with the ids to use as targets.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
       run: async () => ({
         groups: getConfig().groups.map((g) => ({ id: `group:${g.id}`, name: g.name, lights: g.members.length })),
@@ -226,6 +230,15 @@ export function createTools(ctx) {
       description: 'Set the lights back to a saved scene, optionally fading over transitionMs.',
       inputSchema: { type: 'object', properties: { scene: { type: 'string' }, transitionMs: { type: 'number' } }, required: ['scene'], additionalProperties: false },
       run: async (a) => ({ ok: true, scene: (await engine.applyScene(a.scene, a.transitionMs ?? 0)).name }),
+    },
+    {
+      name: 'list_hue_sensors',
+      description: 'Hue motion sensors, dimmers/buttons and contact sensors paired to the Hue bridge (names to use in "hue" triggers).',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: async () => {
+        if (!hueSensors?.status.connected) throw new Error(`Hue sensors are not connected${hueSensors?.status.lastError ? `: ${hueSensors.status.lastError}` : ''}`);
+        return hueSensors.sensors();
+      },
     },
     {
       name: 'mqtt_topics',

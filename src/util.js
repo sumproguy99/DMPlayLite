@@ -76,6 +76,15 @@ export function rgbToXy({ r, g, b }) {
 
 export const rgbToHex = ({ r, g, b }) => `#${[r, g, b].map((c) => clamp(Math.round(c), 0, 255).toString(16).padStart(2, '0')).join('')}`;
 
+// Approximate RGB of a white color temperature (Tanner Helland's fit), for lights without a white channel.
+export function kelvinToRgb(kelvin) {
+  const t = clamp(kelvin, 1000, 40000) / 100;
+  const r = t <= 66 ? 255 : 329.698727446 * (t - 60) ** -0.1332047592;
+  const g = t <= 66 ? 99.4708025861 * Math.log(t) - 161.1195681661 : 288.1221695283 * (t - 60) ** -0.0755148492;
+  const b = t >= 66 ? 255 : t <= 19 ? 0 : 138.5177312231 * Math.log(t - 10) - 305.0447927307;
+  return { r: Math.round(clamp(r, 0, 255)), g: Math.round(clamp(g, 0, 255)), b: Math.round(clamp(b, 0, 255)) };
+}
+
 // CIE xy -> sRGB hex at full brightness (inverse of rgbToXy), for reading a Hue light's color back.
 export function xyToHex([x, y]) {
   if (!y) return '#ffffff';

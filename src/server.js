@@ -46,7 +46,7 @@ function send(res, status, body, headers = {}) {
 }
 
 export function createServer(app) {
-  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, alexa, assistant, tools, scheduler, auth } = app;
+  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, wled, hueSensors, alexa, assistant, tools, scheduler, auth } = app;
   const { getConfig, updateConfig } = config;
   let plexServers = []; // from the last sign-in; tokens stay server-side
 
@@ -71,7 +71,8 @@ export function createServer(app) {
       mqtt: { url: c.mqtt.url, username: c.mqtt.username, hasPassword: Boolean(c.mqtt.password), status: mqtt.status, topics: mqtt.topics.size },
       scenes: (c.scenes ?? []).map((s) => ({ id: s.id, name: s.name, lights: Object.keys(s.lights), savedAt: s.savedAt })),
       plex: { url: c.plex.url, hasToken: Boolean(c.plex.token), pollSeconds: c.plex.pollSeconds, status: plex.status },
-      hue: { bridgeIp: c.hue.bridgeIp, paired: hue.ready, candidates: discovery.list().filter((d) => d.kind === 'hue-bridge').map((d) => d.ip) },
+      hue: { bridgeIp: c.hue.bridgeIp, paired: hue.ready, candidates: discovery.list().filter((d) => d.kind === 'hue-bridge').map((d) => d.ip), sensors: { ...hueSensors.status, devices: hueSensors.sensors() } },
+      wled: { devices: Object.entries(c.wled.devices).map(([id, d]) => ({ id, ...d })), candidates: discovery.list().filter((d) => d.kind === 'wled' && !Object.values(c.wled.devices).some((w) => w.ip === d.ip)).map((d) => ({ ip: d.ip, name: d.name })) },
       govee: { multicastInterface: c.govee.multicastInterface, devices: govee.list() },
       homeassistant: {
         url: c.homeassistant.url,
@@ -270,6 +271,27 @@ export function createServer(app) {
       const username = await hue.pair(ip);
       updateConfig((c) => (c.hue = { bridgeIp: ip, username }));
       log.info(`Hue: paired with bridge at ${ip}`);
+      hueSensors.restart();
+      return { ok: true };
+    },
+
+    // ---------- WLED ----------
+    'POST /api/wled/add': async (req) => {
+      const { ip } = await readJson(req);
+      try {
+        return { ok: true, id: await wled.add(ip) };
+      } catch (err) {
+        throw new HttpError(400, err.message);
+      }
+    },
+    'POST /api/wled/rename': async (req) => {
+      const { id, name } = await readJson(req);
+      wled.rename(id, name);
+      return { ok: true };
+    },
+    'POST /api/wled/remove': async (req) => {
+      const { id } = await readJson(req);
+      wled.remove(id);
       return { ok: true };
     },
 

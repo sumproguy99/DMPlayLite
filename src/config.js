@@ -65,6 +65,7 @@ function defaults() {
     plex: { url: '', token: '', clientId: `playlite-${randomId(8)}`, pollSeconds: 10 },
     hue: { bridgeIp: '', username: '' },
     govee: { devices: {}, multicastInterface: '' },
+    wled: { devices: {} },
     homeassistant: { url: '', token: '' },
     alexa: { enabled: true, port: 80, ids: {}, hidden: [] },
     ai: { apiKey: '', model: '' },
@@ -90,7 +91,7 @@ export function loadConfig() {
     const stored = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     const base = defaults();
     current = { ...base, ...stored };
-    for (const key of ['plex', 'hue', 'govee', 'homeassistant', 'alexa', 'ai', 'ntfy', 'mqtt', 'location']) {
+    for (const key of ['plex', 'hue', 'govee', 'wled', 'homeassistant', 'alexa', 'ai', 'ntfy', 'mqtt', 'location']) {
       current[key] = { ...base[key], ...stored[key] };
     }
   } else {

@@ -18,8 +18,8 @@ import { topicMatches } from './integrations/mqtt.js';
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
 export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
 // "…and it stays that way for N minutes" — only for triggers that describe a state that can end.
-export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode', 'mqtt'];
-export const canHold = (t) => HOLD_SOURCES.includes(t?.source) && !['device.new', 'media.scrobble'].includes(t.event);
+export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue'];
+export const canHold = (t) => HOLD_SOURCES.includes(t?.source) && !['device.new', 'media.scrobble', 'button'].includes(t.event);
 // What an event is about: one HA entity, one network device, one Plex player (player vs media state), the house mode.
 export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? e.topic ?? ''}`;
 export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device));
@@ -51,6 +51,8 @@ export function matchesTrigger(trigger, event, opts) {
   if (trigger.skipContinued && event.continued) return false;
   if (trigger.device && !contains([event.device, event.ip, event.mac, event.kind, event.label].join(' '), trigger.device)) return false;
   if (trigger.entity && !contains(`${event.entity} ${event.name}`, trigger.entity)) return false;
+  if (trigger.button && Number(trigger.button) !== Number(event.button)) return false;
+  if (trigger.press && trigger.press !== event.press) return false;
   if (trigger.to && String(event.to).toLowerCase() !== String(trigger.to).toLowerCase()) return false;
   if (trigger.from && String(event.from).toLowerCase() !== String(trigger.from).toLowerCase()) return false;
   return true;
@@ -141,7 +143,7 @@ export class Engine {
   }
 
   handle(event) {
-    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`]
+    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.source === 'hue' && (event.to ?? `button ${event.button ?? ''} ${event.press}`), event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`]
       .filter(Boolean)
       .join(' ');
     // chatty sources (MQTT) can send many messages a second — log only the ones that start or end something

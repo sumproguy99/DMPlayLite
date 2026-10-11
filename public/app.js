@@ -5,6 +5,7 @@ const SOURCES = [
   { id: 'plex', icon: '🎬', name: 'Plex', blurb: 'Playback & players' },
   { id: 'network', icon: '📶', name: 'Network device', blurb: 'Phones, TVs, anything on Wi-Fi' },
   { id: 'homeassistant', icon: '🏠', name: 'Home Assistant', blurb: 'Any sensor, switch, lock…' },
+  { id: 'hue', icon: '🔘', name: 'Hue sensor', blurb: 'Motion, dimmers, buttons, contact' },
   { id: 'time', icon: '🌅', name: 'Time & sun', blurb: 'Clock, sunrise, sunset' },
   { id: 'webhook', icon: '🔗', name: 'Webhook / Siri', blurb: 'Shortcuts, IFTTT, Zapier, anything' },
   { id: 'mode', icon: '🎭', name: 'House mode', blurb: 'Home, away, movie, sleep…' },
@@ -26,6 +27,7 @@ const EVENTS = {
     ['device.new', 'A never-seen-before device joins'],
   ],
   homeassistant: [['state', 'An entity changes state']],
+  hue: [['motion', 'Motion sensor'], ['button', 'Button / dimmer pressed'], ['contact', 'Door / window contact']],
   time: [
     ['time.at', 'At a time of day'],
     ['sun.sunset', 'At sunset'],
@@ -51,6 +53,7 @@ const STEP_TYPES = [
   ['mqtt', '📡', 'MQTT message'],
 ];
 const modeOptions = (selected, anyLabel) => `${anyLabel ? `<option value="">${anyLabel}</option>` : ''}${S.state.modes.map((m) => `<option value="${esc(m)}" ${selected === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}`;
+const HUE_PRESSES = [['short_release', 'Short press'], ['long_press', 'Long press (hold)'], ['repeat', 'Held — repeats while held'], ['long_release', 'Released after holding'], ['initial_press', 'Pressed down (fastest)']];
 const NTFY_PRIORITIES = [[1, 'Min'], [2, 'Low'], [3, 'Normal'], [4, 'High'], [5, 'Urgent']];
 const KIND_ICON = {
   phone: '📱', tablet: '📱', apple: '🍎', computer: '💻', printer: '🖨', router: '🛜', camera: '📷', doorbell: '🔔',
@@ -200,13 +203,14 @@ function describeTrigger(tr) {
   if (tr.source === 'webhook') text = `webhook ${b(tr.event)} is called`;
   else if (tr.source === 'time' && tr.event === 'time.at') text = `it's ${b(tr.at)}${tr.days?.length && tr.days.length < 7 ? ` on ${tr.days.map((d) => DAYS[d]).join(', ')}` : ''}`;
   else if (tr.source === 'time') text = `${b(tr.event === 'sun.sunset' ? 'sunset' : 'sunrise')}${tr.offsetMin ? ` ${tr.offsetMin > 0 ? '+' : '−'}${Math.abs(tr.offsetMin)} min` : ''}`;
+  else if (tr.source === 'hue') text = `${b(tr.device || 'any Hue sensor')} ${tr.event === 'button' ? `${HUE_PRESSES.find(([k]) => k === (tr.press ?? 'short_release'))?.[1].toLowerCase() ?? esc(tr.press)}${tr.button ? ` on button ${b(tr.button)}` : ''}` : tr.event === 'motion' ? (tr.to === 'clear' ? 'motion clears' : tr.to === 'detected' ? 'detects motion' : 'motion changes') : tr.to ? `is ${b(tr.to)}` : 'opens or closes'}`;
   else if (tr.source === 'mqtt') text = `MQTT ${b(tr.topic || 'any topic')}${tr.field ? ` — ${b(tr.field)} changes${tr.value != null && tr.value !== '' ? ` to ${b(tr.value)}` : ''}` : tr.payload ? ` says ${b(tr.payload)}` : ''}`;
   else if (tr.source === 'mode') text = `house mode changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
   else if (tr.source === 'homeassistant') text = `${b(tr.entity || 'any entity')} changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
   else text = b(eventLabel(tr.source, tr.event));
   const bits = [text];
   if (tr.player) bits.push(`on ${b(tr.player)}`);
-  if (tr.device) bits.push(`— ${b(tr.device)}`);
+  if (tr.device && tr.source !== 'hue') bits.push(`— ${b(tr.device)}`);
   if (tr.user) bits.push(`by ${b(tr.user)}`);
   if (tr.mediaTypes?.length && tr.mediaTypes.length < 4) bits.push(`(${tr.mediaTypes.join(', ')})`);
   if (tr.forMin > 0) bits.push(`for ${b(`${tr.forMin} min`)}`);
@@ -330,7 +334,7 @@ function targetPicker(selected, path) {
 }
 
 // Same rule as the engine: only triggers describing a state that can end can "stay that way".
-const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode', 'mqtt'].includes(tr.source) && !['device.new', 'media.scrobble'].includes(tr.event);
+const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue'].includes(tr.source) && !['device.new', 'media.scrobble', 'button'].includes(tr.event);
 
 function triggerFields(tr, base = 'trigger') {
   if (!canHold(tr)) {
@@ -339,7 +343,7 @@ function triggerFields(tr, base = 'trigger') {
   }
   return `${sourceFields(tr, base)}
       <div class="fields" style="margin-top:10px">
-        <label class="field">…and it stays that way for <small>(minutes, optional)</small><input type="number" min="0" step="any" data-bind="${base}.forMin" data-type="num" value="${tr.forMin ?? ''}" placeholder="run right away"></label>
+        <label class="field">…and it stays that way for <small>(minutes, optional)</small><input type="number" min="0" step="any" data-bind="${base}.forMin" data-type="num" value="${tr.forMin ?? ''}" placeholder="no wait"></label>
       </div>`;
 }
 
@@ -373,6 +377,31 @@ function sourceFields(tr, base) {
       <label class="field">From<input type="text" data-bind="${base}.from" value="${esc(tr.from)}" placeholder="any"></label>
       <label class="field">To<input type="text" data-bind="${base}.to" value="${esc(tr.to)}" placeholder="e.g. on"></label></div>
       ${S.state.homeassistant.status.connected ? '' : '<p class="small muted">Connect Home Assistant under Connections first.</p>'}`;
+  }
+  if (tr.source === 'hue') {
+    const sensors = S.state.hue.sensors?.devices ?? [];
+    const kind = tr.event;
+    // keep only the filters that make sense for this kind of sensor
+    if (kind === 'button') {
+      delete tr.to;
+      tr.press ??= 'short_release'; // otherwise one press fires twice (pressed + released)
+    } else {
+      delete tr.button;
+      delete tr.press;
+      const valid = kind === 'motion' ? ['detected', 'clear'] : ['open', 'closed'];
+      if (tr.to && !valid.includes(tr.to)) tr.to = valid[0];
+    }
+    const names = sensors.filter((x) => x.kinds.includes(kind)).map((x) => x.name);
+    const opt = (v, label, cur) => `<option value="${v}" ${(cur ?? '') === v ? 'selected' : ''}>${label}</option>`;
+    return `<div class="fields">${eventSelect}
+      <label class="field grow">Which ${kind === 'button' ? 'button / dimmer' : 'sensor'} (name contains)<input type="text" data-bind="${base}.device" value="${esc(tr.device)}" placeholder="any" list="huesensors-${kind}"></label>
+      <datalist id="huesensors-${kind}">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+      ${kind === 'motion' ? `<label class="field">When<select data-bind="${base}.to">${opt('detected', 'Motion detected', tr.to)}${opt('clear', 'Motion clears', tr.to)}${opt('', 'Either', tr.to)}</select></label>` : ''}
+      ${kind === 'contact' ? `<label class="field">When<select data-bind="${base}.to">${opt('open', 'Opens', tr.to)}${opt('closed', 'Closes', tr.to)}${opt('', 'Either', tr.to)}</select></label>` : ''}
+      ${kind === 'button' ? `<label class="field">Button<select data-bind="${base}.button" data-type="num">${opt('', 'Any', tr.button == null ? '' : String(tr.button))}${[1, 2, 3, 4].map((n) => opt(String(n), `${n}${n === 1 ? ' (top / On)' : n === 4 ? ' (bottom / Off)' : ''}`, tr.button == null ? '' : String(tr.button))).join('')}</select></label>
+        <label class="field">Press<select data-bind="${base}.press">${HUE_PRESSES.map(([k, n]) => opt(k, n, tr.press ?? 'short_release')).join('')}</select></label>` : ''}
+      </div>
+      ${S.state.hue.sensors?.connected ? (names.length ? '' : `<p class="small muted">No Hue ${kind === 'button' ? 'buttons or dimmers' : `${kind} sensors`} found on the bridge yet.</p>`) : `<p class="small muted">${S.state.hue.paired ? `Hue sensors aren't connected${S.state.hue.sensors?.lastError ? ` (${esc(S.state.hue.sensors.lastError)})` : ''}.` : 'Pair the Hue bridge under Connections first.'}</p>`}`;
   }
   if (tr.source === 'mqtt') {
     const last = S.mqttTopics?.find((x) => x.topic === tr.topic);
@@ -666,6 +695,7 @@ function wireEditor() {
     const t = { source: src, event: EVENTS[src][0]?.[0] ?? '' };
     if (src === 'plex') t.mediaTypes = ['movie', 'episode', 'clip'];
     if (src === 'time') t.at = '18:00';
+    if (src === 'hue') t.to = 'detected';
     if (src === 'network' && !S.network.length) refreshNetwork().then(renderEditor).catch(() => {});
     return t;
   };
@@ -882,13 +912,13 @@ function renderLights() {
     <div class="row spread check" style="cursor:default">
       <span>${esc(l.name)}<br><small>${esc(l.kind.replace('-', ' '))}${l.ip ? ` · ${esc(l.ip)}` : ''}${l.reachable === false ? ' · unreachable' : ''}</small></span>
       <span class="row">
-        ${l.kind === 'govee' ? `<button class="btn sm ghost" data-rename="${esc(l.id)}">Rename</button>` : ''}
+        ${l.kind === 'govee' || l.kind === 'wled' ? `<button class="btn sm ghost" data-rename="${esc(l.id)}">Rename</button>` : ''}
         <button class="btn sm" data-identify="${esc(l.id)}">Identify</button>
       </span>
     </div>`;
   el.innerHTML = `
     <div class="row spread" style="margin-bottom:14px">
-      <div><h2>Groups</h2><p class="sub" style="margin:0">Mix Hue, Govee and Home Assistant lights into named groups. Groups also show up in Alexa.</p></div>
+      <div><h2>Groups</h2><p class="sub" style="margin:0">Mix Hue, Govee, WLED and Home Assistant lights into named groups. Groups also show up in Alexa.</p></div>
       <button class="btn primary" id="add-group">+ New group</button>
     </div>
     <div class="stack" id="groups">
@@ -995,10 +1025,10 @@ function renderLights() {
     await busy(b, '…', () => api('POST', '/api/lights/identify', { target: b.dataset.identify }));
   })));
   el.querySelectorAll('[data-rename]').forEach((b) => (b.onclick = guard(async () => {
-    const id = b.dataset.rename.slice('govee:'.length);
+    const [kind, id] = [b.dataset.rename.slice(0, b.dataset.rename.indexOf(':')), b.dataset.rename.slice(b.dataset.rename.indexOf(':') + 1)];
     const name = prompt('Name for this light', targetName(b.dataset.rename));
     if (!name) return;
-    await api('POST', '/api/govee/rename', { id, name });
+    await api('POST', `/api/${kind}/rename`, { id, name });
     await refreshLights();
   })));
 }
@@ -1010,7 +1040,7 @@ function statusPill(ok, text, bad = false) {
 
 function renderConnections() {
   const el = $('#tab-connections');
-  const { plex, hue, govee, urls, homeassistant: ha, alexa, ai, ntfy, mqtt, location: loc, sky } = S.state;
+  const { plex, hue, govee, wled, urls, homeassistant: ha, alexa, ai, ntfy, mqtt, location: loc, sky } = S.state;
   const ntfyWeb = `${(ntfy.server || 'https://ntfy.sh').replace(/\/+$/, '')}/${encodeURIComponent(ntfy.topic || '')}`;
   const alexaOk = alexa.status.http === 'listening';
   el.innerHTML = `
@@ -1055,6 +1085,18 @@ function renderConnections() {
           <button class="btn" id="hue-find">Find</button>
           <button class="btn primary" id="hue-pair">Pair</button>
         </div>
+        ${hue.paired ? `<p class="small muted" style="margin:0">🔘 Sensors &amp; buttons: ${hue.sensors.connected ? `listening · ${hue.sensors.devices.length ? esc(hue.sensors.devices.map((x) => x.name).join(', ')) : 'none paired to the bridge'}` : `<span style="color:var(--warn)">not connected${hue.sensors.lastError ? ` — ${esc(hue.sensors.lastError)}` : ''}</span>`}</p>` : ''}
+      </div>
+
+      <div class="card stack">
+        <div class="row spread"><h2>🌈 WLED</h2>${statusPill(wled.devices.length, `${wled.devices.length} added`)}</div>
+        <p class="small muted" style="margin:0">LED strips running <b>WLED</b> — fades, colors and white tones work like any other light.</p>
+        ${wled.candidates.length ? `<div class="small">🔎 Found on your network: ${wled.candidates.map((c) => `<button class="btn sm" data-wledadd="${esc(c.ip)}">+ ${esc(c.name ?? c.ip)}</button>`).join(' ')}</div>` : ''}
+        <div class="fields">
+          <label class="field grow">Add by IP<input type="text" id="wled-ip" placeholder="192.168.1.60"></label>
+          <button class="btn" id="wled-add">Add</button>
+        </div>
+        ${wled.devices.map((d) => `<div class="row spread small"><span>${esc(d.name)} <span class="muted">${esc(d.ip)}${d.leds ? ` · ${d.leds} LEDs` : ''}</span></span><button class="btn sm ghost danger" data-wremove="${esc(d.id)}">Remove</button></div>`).join('')}
       </div>
 
       <div class="card stack">
@@ -1199,6 +1241,17 @@ function renderConnections() {
     toast(`Found ${res.found.length} Govee device${res.found.length === 1 ? '' : 's'}`);
     await Promise.all([refresh(), refreshLights()]);
   }));
+  const addWled = (ip, btn) => guard(async () => busy(btn, 'Adding…', async () => {
+    await api('POST', '/api/wled/add', { ip });
+    toast('WLED added');
+    await Promise.all([refresh(), refreshLights()]);
+  }))();
+  $('#wled-add').onclick = (e) => addWled($('#wled-ip').value.trim(), e.target);
+  el.querySelectorAll('[data-wledadd]').forEach((b) => (b.onclick = () => addWled(b.dataset.wledadd, b)));
+  el.querySelectorAll('[data-wremove]').forEach((b) => (b.onclick = guard(async () => {
+    await api('POST', '/api/wled/remove', { id: b.dataset.wremove });
+    await Promise.all([refresh(), refreshLights()]);
+  })));
   $('#govee-add').onclick = guard(async () => {
     await api('POST', '/api/govee/add', { ip: $('#govee-ip').value.trim() });
     toast('Added');
