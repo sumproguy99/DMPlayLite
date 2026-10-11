@@ -12,6 +12,8 @@ import { Engine, matchesTrigger, template, ntfyRequest } from '../src/engine.js'
 import { nextFireToday, Scheduler } from '../src/scheduler.js';
 import { classify, vendorFor, pickName } from '../src/discovery.js';
 import { encodeQuery, decodePacket } from '../src/dns.js';
+import { Mqtt, topicMatches, parsePackets, publishPacket, decodePublish } from '../src/integrations/mqtt.js';
+import { startBroker } from './mini-broker.js';
 
 test('sunrise/sunset are plausible (Nashville, June 21)', () => {
   const { sunrise, sunset } = sunTimes(new Date('2026-06-21T12:00:00-05:00'), 36.16, -86.78);
@@ -367,4 +369,81 @@ test('scenes: save, restore in a workflow, capture step, colors, MCP', async () 
   bulbs[1].brightness = 5;
   assert.deepEqual(await call('apply_scene', { scene: 'Evening' }), { ok: true, scene: 'Evening' });
   assert.equal(bulbs[1].brightness, 81);
+});
+
+test('mqtt: codec and topic wildcards', () => {
+  assert.ok(topicMatches('zigbee2mqtt/+', 'zigbee2mqtt/Hall'));
+  assert.ok(!topicMatches('zigbee2mqtt/+', 'zigbee2mqtt/Hall/set'));
+  assert.ok(topicMatches('zigbee2mqtt/#', 'zigbee2mqtt/Hall/set'));
+  assert.ok(topicMatches('a/b', 'a/b') && !topicMatches('a/b', 'a/c') && !topicMatches('a/b/c', 'a/b'));
+  // a 300-byte payload needs a 2-byte length; split across chunks
+  const big = publishPacket('t/x', 'y'.repeat(300), { retain: true });
+  let r = parsePackets(big.subarray(0, 5));
+  assert.equal(r.packets.length, 0);
+  r = parsePackets(Buffer.concat([r.rest, big.subarray(5), publishPacket('t/y', 'hi')]));
+  assert.equal(r.packets.length, 2);
+  assert.deepEqual(decodePublish(r.packets[0]), { topic: 't/x', qos: 0, id: null, retain: true, payload: 'y'.repeat(300) });
+  assert.equal(decodePublish(r.packets[1]).payload, 'hi');
+});
+
+test('mqtt: client auth, events, retained skipped, QoS1 ack, publish, triggers', async (t) => {
+  const broker = await startBroker({ username: 'u', password: 'p', qos: 1 });
+  t.after(() => broker.close());
+  const url = `mqtt://127.0.0.1:${broker.port}`;
+  await assert.rejects(Mqtt.test({ url, username: 'u', password: 'wrong' }), /wrong username or password/);
+  await assert.rejects(Mqtt.test({ url: 'http://x' }), /should look like mqtt/);
+  await Mqtt.test({ url, username: 'u', password: 'p' });
+
+  broker.send('zigbee2mqtt/Hall', { occupancy: false, battery: 90 }, { retain: true });
+  const config = { mqtt: { url, username: 'u', password: 'p' }, routines: [], groups: [] };
+  const log = { entries: [], info() {}, warn() {}, error() {}, event() {} };
+  const mqtt = new Mqtt(() => config, log);
+  const events = [];
+  mqtt.on('event', (e) => events.push(e));
+  t.after(() => mqtt.stop());
+  mqtt.restart();
+  for (let i = 0; i < 50 && !mqtt.topics.size; i++) await sleep(20);
+  assert.equal(mqtt.status.connected, true);
+  assert.equal(events.length, 0, 'retained message must not fire workflows');
+  assert.equal(mqtt.topics.get('zigbee2mqtt/Hall').json.battery, 90);
+
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, mqtt });
+  mqtt.on('event', (e) => engine.handle(e));
+  const fired = [];
+  const realRun = engine.run.bind(engine);
+  engine.run = (r, e) => (fired.push(`${r.id}:${e.json?.occupancy ?? e.payload}`), realRun(r, e));
+  config.routines = [
+    { id: 'motion', enabled: true, name: 'Motion', trigger: { source: 'mqtt', event: 'message', topic: 'zigbee2mqtt/+', field: 'occupancy', value: 'true' }, steps: [{ type: 'mqtt', topic: 'zigbee2mqtt/Lamp/set', payload: { state: 'ON', by: '{{topic}}' } }] },
+    { id: 'plug', enabled: true, name: 'Plug', trigger: { source: 'mqtt', event: 'message', topic: 'stat/plug/POWER', payload: 'on' }, steps: [{ type: 'wait', ms: 0 }] },
+  ];
+  broker.send('zigbee2mqtt/Hall', { occupancy: true, battery: 90 });
+  broker.send('zigbee2mqtt/Hall', { occupancy: true, battery: 89 }); // same occupancy → no new run
+  broker.send('stat/plug/POWER', 'ON');
+  broker.send('stat/plug/POWER', 'OFF');
+  for (let i = 0; i < 50 && broker.received.length < 1; i++) await sleep(20);
+  assert.deepEqual(fired, ['motion:true', 'plug:ON']);
+  assert.deepEqual(broker.received.map((m) => [m.topic, JSON.parse(m.payload)]), [['zigbee2mqtt/Lamp/set', { state: 'ON', by: 'zigbee2mqtt/Hall' }]]);
+  assert.ok(broker.acks.length >= 4, 'QoS 1 messages are acknowledged');
+
+  // "no motion for N minutes": battery-only updates keep the wait, motion cancels it
+  config.routines = [{ id: 'still', enabled: true, name: 'Still', trigger: { source: 'mqtt', event: 'message', topic: 'zigbee2mqtt/Hall', field: 'occupancy', value: 'false', forMin: 0.002 }, steps: [] }];
+  broker.send('zigbee2mqtt/Hall', { occupancy: false, battery: 89 });
+  await sleep(40);
+  broker.send('zigbee2mqtt/Hall', { occupancy: false, battery: 88 });
+  await sleep(40);
+  assert.equal(engine.waiting.length, 1);
+  await sleep(120);
+  assert.deepEqual(fired.slice(2), ['still:false']);
+  broker.send('zigbee2mqtt/Hall', { occupancy: true });
+  broker.send('zigbee2mqtt/Hall', { occupancy: false });
+  await sleep(40);
+  broker.send('zigbee2mqtt/Hall', { occupancy: true }); // motion again → cancelled
+  await sleep(150);
+  assert.equal(fired.length, 3);
+
+  assert.throws(() => mqtt.publish('a/#', 'x'), /wildcards/);
+  assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'mqtt', event: 'message' }, steps: [{ type: 'wait' }] }), /needs a topic/);
+  assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'webhook', event: 'x' }, steps: [{ type: 'mqtt', topic: 'a/+' }] }), /plain topic/);
+  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights: null, discovery: null, ha: null, mqtt, log });
+  assert.ok((await tools.find((t) => t.name === 'mqtt_topics').run({ query: 'plug' })).some((t) => t.topic === 'stat/plug/POWER'));
 });

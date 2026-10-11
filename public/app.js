@@ -8,6 +8,7 @@ const SOURCES = [
   { id: 'time', icon: '🌅', name: 'Time & sun', blurb: 'Clock, sunrise, sunset' },
   { id: 'webhook', icon: '🔗', name: 'Webhook / Siri', blurb: 'Shortcuts, IFTTT, Zapier, anything' },
   { id: 'mode', icon: '🎭', name: 'House mode', blurb: 'Home, away, movie, sleep…' },
+  { id: 'mqtt', icon: '📡', name: 'MQTT', blurb: 'Zigbee2MQTT, Tasmota, sensors…' },
 ];
 const EVENTS = {
   plex: [
@@ -32,6 +33,7 @@ const EVENTS = {
   ],
   webhook: [],
   mode: [['mode.changed', 'House mode changes']],
+  mqtt: [['message', 'A message arrives']],
 };
 const MEDIA_TYPES = [['movie', 'Movies'], ['episode', 'TV episodes'], ['clip', 'Clips'], ['track', 'Music']];
 const WHITES = [[2200, 'Candle'], [2700, 'Warm'], [3000, 'Soft'], [4000, 'Natural'], [5000, 'Daylight'], [6500, 'Cool']];
@@ -46,6 +48,7 @@ const STEP_TYPES = [
   ['mode', '🎭', 'Set house mode'],
   ['scene', '🎬', 'Scene'],
   ['capture', '📸', 'Save scene'],
+  ['mqtt', '📡', 'MQTT message'],
 ];
 const modeOptions = (selected, anyLabel) => `${anyLabel ? `<option value="">${anyLabel}</option>` : ''}${S.state.modes.map((m) => `<option value="${esc(m)}" ${selected === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}`;
 const NTFY_PRIORITIES = [[1, 'Min'], [2, 'Low'], [3, 'Normal'], [4, 'High'], [5, 'Urgent']];
@@ -177,6 +180,7 @@ function describeStep(step) {
   if (step.type === 'http') return `🌐 ${esc(step.method ?? 'POST')} ${esc(step.url)}`;
   if (step.type === 'ha') return `🏠 ${esc(step.service)} ${esc(step.data?.entity_id ?? '')}`;
   if (step.type === 'mode') return `🎭 house mode → <b>${esc(step.mode)}</b>`;
+  if (step.type === 'mqtt') return `📡 ${esc(step.topic)} ← ${esc(typeof step.payload === 'object' ? JSON.stringify(step.payload) : step.payload ?? '')}${step.retain ? ' (retained)' : ''}`;
   if (step.type === 'scene') return `🎬 scene <b>${esc(step.scene)}</b>${step.transitionMs ? ` over ${sec(step.transitionMs)}s` : ''}`;
   if (step.type === 'capture') return `📸 save lights as scene <b>${esc(step.scene)}</b>${t}`;
   if (step.type === 'notify') return `📲 “${esc(step.title ? `${step.title}: ${step.message}` : step.message)}”${step.topic ? ` → ${esc(step.topic)}` : ''}${step.priority >= 4 ? ' (high priority)' : ''}`;
@@ -196,6 +200,7 @@ function describeTrigger(tr) {
   if (tr.source === 'webhook') text = `webhook ${b(tr.event)} is called`;
   else if (tr.source === 'time' && tr.event === 'time.at') text = `it's ${b(tr.at)}${tr.days?.length && tr.days.length < 7 ? ` on ${tr.days.map((d) => DAYS[d]).join(', ')}` : ''}`;
   else if (tr.source === 'time') text = `${b(tr.event === 'sun.sunset' ? 'sunset' : 'sunrise')}${tr.offsetMin ? ` ${tr.offsetMin > 0 ? '+' : '−'}${Math.abs(tr.offsetMin)} min` : ''}`;
+  else if (tr.source === 'mqtt') text = `MQTT ${b(tr.topic || 'any topic')}${tr.field ? ` — ${b(tr.field)} changes${tr.value != null && tr.value !== '' ? ` to ${b(tr.value)}` : ''}` : tr.payload ? ` says ${b(tr.payload)}` : ''}`;
   else if (tr.source === 'mode') text = `house mode changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
   else if (tr.source === 'homeassistant') text = `${b(tr.entity || 'any entity')} changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
   else text = b(eventLabel(tr.source, tr.event));
@@ -325,7 +330,7 @@ function targetPicker(selected, path) {
 }
 
 // Same rule as the engine: only triggers describing a state that can end can "stay that way".
-const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode'].includes(tr.source) && !['device.new', 'media.scrobble'].includes(tr.event);
+const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode', 'mqtt'].includes(tr.source) && !['device.new', 'media.scrobble'].includes(tr.event);
 
 function triggerFields(tr, base = 'trigger') {
   if (!canHold(tr)) {
@@ -368,6 +373,20 @@ function sourceFields(tr, base) {
       <label class="field">From<input type="text" data-bind="${base}.from" value="${esc(tr.from)}" placeholder="any"></label>
       <label class="field">To<input type="text" data-bind="${base}.to" value="${esc(tr.to)}" placeholder="e.g. on"></label></div>
       ${S.state.homeassistant.status.connected ? '' : '<p class="small muted">Connect Home Assistant under Connections first.</p>'}`;
+  }
+  if (tr.source === 'mqtt') {
+    const last = S.mqttTopics?.find((x) => x.topic === tr.topic);
+    return `<div class="fields">
+      <label class="field grow">Topic <small>(+ and # wildcards ok)</small><input type="text" data-bind="${base}.topic" value="${esc(tr.topic)}" placeholder="zigbee2mqtt/Hall motion" list="mqtttopics" data-rerender-blur></label>
+      <label class="field">JSON field <small>(optional)</small><input type="text" data-bind="${base}.field" value="${esc(tr.field)}" placeholder="e.g. occupancy" data-rerender-blur></label>
+      ${tr.field
+        ? `<label class="field">Changes to <small>(optional)</small><input type="text" data-bind="${base}.value" value="${esc(tr.value)}" placeholder="any change"></label>`
+        : `<label class="field">Message equals <small>(optional)</small><input type="text" data-bind="${base}.payload" value="${esc(tr.payload)}" placeholder="any message"></label>`}
+      </div>
+      <datalist id="mqtttopics" data-mqtt-list></datalist>
+      ${last ? `<p class="small muted" style="margin:6px 0 0">Last message: <code>${esc(last.payload.slice(0, 200))}</code></p>` : ''}
+      <p class="small muted" style="margin:6px 0 0">${tr.field ? 'Fires when that field changes — not on every repeat of the same value.' : 'Leave the JSON field empty to match the whole message (Tasmota “ON”, rtl_433 lines…).'} Use {{topic}}, {{payload}}, {{json.<i>field</i>}} in later steps.</p>
+      ${S.state.mqtt?.status.connected ? '' : '<p class="small muted">Connect MQTT under Connections first.</p>'}`;
   }
   if (tr.source === 'mode') {
     return `<div class="fields">
@@ -437,6 +456,13 @@ function stepEditor(step, i) {
       </div>`;
   } else if (step.type === 'mode') {
     body = `<div class="fields"><label class="field grow">Switch the house mode to<select data-bind="${p}.mode">${modeOptions(step.mode)}</select></label></div>`;
+  } else if (step.type === 'mqtt') {
+    body = `<div class="fields">
+        <label class="field grow">Topic<input type="text" data-bind="${p}.topic" value="${esc(step.topic)}" placeholder="zigbee2mqtt/Lamp/set" list="mqtttopics"></label>
+        <label class="row small"><input type="checkbox" data-bind="${p}.retain" data-type="flag" ${step.retain ? 'checked' : ''}> Retain</label>
+      </div>
+      <label class="field">Message (JSON or text)<textarea data-bind="${p}.payload" data-type="jsonish" rows="2" placeholder='{"state":"ON","brightness":200}'>${esc(typeof step.payload === 'object' ? JSON.stringify(step.payload) : step.payload ?? '')}</textarea></label>
+      <p class="muted small" style="margin:0">Zigbee2MQTT: <code>zigbee2mqtt/&lt;name&gt;/set</code> with <code>{"state":"TOGGLE"}</code> · Tasmota: <code>cmnd/&lt;name&gt;/POWER</code> with <code>ON</code>. {{variables}} work.</p>`;
   } else if (step.type === 'scene') {
     body = `<div class="fields">
         <label class="field grow">Scene<input type="text" data-bind="${p}.scene" value="${esc(step.scene)}" placeholder="scene name" list="scenenames"></label>
@@ -566,6 +592,17 @@ function renderEditor() {
     </div>`;
   wireEditor();
   if ([tr, ...(d.orTriggers ?? [])].some((t) => t.source === 'homeassistant') || d.steps.some((s) => s.type === 'ha')) fillHaEntities();
+  if ([tr, ...(d.orTriggers ?? [])].some((t) => t.source === 'mqtt') || d.steps.some((s) => s.type === 'mqtt')) fillMqttTopics();
+}
+
+async function fillMqttTopics() {
+  if (!S.state.mqtt?.status.connected) return;
+  const fresh = !S.mqttTopics;
+  S.mqttTopics = await api('GET', '/api/mqtt/topics').catch(() => S.mqttTopics ?? []);
+  const html = S.mqttTopics.map((t) => `<option value="${esc(t.topic)}">`).join('');
+  document.querySelectorAll('#mqtttopics').forEach((dl) => (dl.innerHTML = html));
+  if (!document.getElementById('mqtttopics')) $('#editor').insertAdjacentHTML('beforeend', `<datalist id="mqtttopics">${html}</datalist>`);
+  if (fresh && $('#editor').open) renderEditor(); // show "last message" hints
 }
 
 async function fillHaEntities() {
@@ -760,6 +797,7 @@ function newStep(type) {
   if (type === 'mode') return { type, mode: S.state.modes.find((m) => m !== S.state.mode) ?? S.state.modes[0] };
   if (type === 'scene') return { type, scene: S.state.scenes?.[0]?.name ?? '', transitionMs: 2000 };
   if (type === 'capture') return { type, scene: '' };
+  if (type === 'mqtt') return { type, topic: '', payload: '' };
   return { type: 'set', brightness: 50, transitionMs: 3000 };
 }
 
@@ -972,7 +1010,7 @@ function statusPill(ok, text, bad = false) {
 
 function renderConnections() {
   const el = $('#tab-connections');
-  const { plex, hue, govee, urls, homeassistant: ha, alexa, ai, ntfy, location: loc, sky } = S.state;
+  const { plex, hue, govee, urls, homeassistant: ha, alexa, ai, ntfy, mqtt, location: loc, sky } = S.state;
   const ntfyWeb = `${(ntfy.server || 'https://ntfy.sh').replace(/\/+$/, '')}/${encodeURIComponent(ntfy.topic || '')}`;
   const alexaOk = alexa.status.http === 'listening';
   el.innerHTML = `
@@ -1054,6 +1092,19 @@ function renderConnections() {
         <div class="small"><b>Ask Playlite anything</b> — add <i>Dictate Text</i> first, put it after <code>q=</code>, then <i>Speak Text</i> the result:</div>
         ${copyBox(urls.ask)}
         <p class="small muted" style="margin:0">Also great as iPhone Personal Automations: arrive home, leave, alarm stopped, Focus on, NFC tag tapped.</p>
+      </div>
+
+      <div class="card stack">
+        <div class="row spread"><h2>📡 MQTT</h2>${statusPill(mqtt.status.connected, mqtt.status.connected ? `Connected · ${mqtt.topics} topics` : mqtt.url ? esc(mqtt.status.lastError ?? 'Connecting…') : 'Not set up', Boolean(mqtt.url && !mqtt.status.connected))}</div>
+        <p class="small muted" style="margin:0">Point Playlite at your MQTT broker (e.g. Mosquitto) to use <b>Zigbee2MQTT</b> sensors and buttons, <b>Tasmota</b>/<b>Shelly</b> plugs, <b>ESPHome</b>, <b>Frigate</b>, <b>rtl_433</b>… as triggers, and to send them commands.</p>
+        <div class="fields">
+          <label class="field grow">Broker<input type="text" id="mqtt-url" value="${esc(mqtt.url)}" placeholder="mqtt://192.168.1.10:1883"></label>
+          <label class="field">Username<input type="text" id="mqtt-user" value="${esc(mqtt.username)}" placeholder="optional" autocomplete="off"></label>
+          <label class="field">Password<input type="password" id="mqtt-pass" placeholder="${mqtt.hasPassword ? '•••••• (saved)' : 'optional'}" autocomplete="new-password"></label>
+          <button class="btn primary" id="mqtt-save">Save</button>
+        </div>
+        ${mqtt.status.connected ? '<details id="mqtt-browse"><summary class="small muted">Recent topics</summary><div id="mqtt-topics" class="small" style="margin-top:8px">Loading…</div></details>' : ''}
+        <p class="small muted" style="margin:0">Use <code>mqtts://</code> for TLS. Leave the broker empty to turn MQTT off.</p>
       </div>
 
       <div class="card stack">
@@ -1162,6 +1213,19 @@ function renderConnections() {
     setTimeout(refresh, 800);
     toast('Saved');
   });
+  $('#mqtt-save').onclick = guard(async (e) => busy(e.target, 'Connecting…', async () => {
+    const body = { url: $('#mqtt-url').value.trim(), username: $('#mqtt-user').value.trim() };
+    if ($('#mqtt-pass').value) body.password = $('#mqtt-pass').value;
+    await api('POST', '/api/mqtt/settings', body);
+    toast(body.url ? 'MQTT connected' : 'MQTT turned off');
+    S.mqttTopics = null;
+    setTimeout(refresh, 600);
+  }));
+  $('#mqtt-browse')?.addEventListener('toggle', guard(async (e) => {
+    if (!e.target.open) return;
+    const list = await api('GET', '/api/mqtt/topics');
+    $('#mqtt-topics').innerHTML = list.slice(0, 80).map((t) => `<div class="mqtt-row"><code>${esc(t.topic)}</code> <span class="muted">${esc(t.payload.slice(0, 140))}</span></div>`).join('') || '<span class="muted">No messages yet.</span>';
+  }));
   $('#ntfy-save').onclick = guard(async () => {
     const body = { topic: $('#ntfy-topic').value.trim(), server: $('#ntfy-server').value.trim() };
     if ($('#ntfy-token').value.trim()) body.token = $('#ntfy-token').value.trim();
@@ -1319,7 +1383,7 @@ if (saved && saved !== 'routines' && document.getElementById(`tab-${saved}`)) sh
 
 setInterval(() => api('GET', '/api/state').then((s) => {
   const waitingChanged = JSON.stringify(s.waiting) !== JSON.stringify(S.state.waiting);
-  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
+  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
   renderHeader();
   if (waitingChanged && !$('#idea')?.value) renderRoutines(); // don't wipe an idea being typed
 }).catch(() => {}), 10_000);

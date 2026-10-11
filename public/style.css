@@ -204,3 +204,4 @@ pre.code { background: var(--bg); border: 1px solid var(--border); border-radius
   .devices { grid-template-columns: 1fr; }
 }
 .card.stack { align-content: start; }
+.mqtt-row { padding: 3px 0; border-bottom: 1px solid var(--border); overflow-wrap: anywhere; }

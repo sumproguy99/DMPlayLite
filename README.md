@@ -41,6 +41,7 @@ Environment: `PORT` (8787), `PLAYLITE_DATA` (config folder, `./data`), `ANTHROPI
 | **House modes** | home / away / movie / sleep / guest — switch from the header, a workflow step, Siri (`/mode/<name>`) or the AI; "mode changes" trigger and "only if mode is…" condition |
 | **Scenes** | Save how lights look (brightness + white or color) under a name on the Lights tab, then restore with a tap, a "🎬 Scene" step, Siri (`/scene/<name>`) or the AI. A "📸 Save scene" step captures the room mid-workflow — e.g. remember it when a movie starts, put it back when it stops |
 | **Phone alerts** | "📲 Phone alert" step pushes to the ntfy app (iOS/Android) — title, priority, emoji tags, tap-to-open link, `{{variables}}`; public ntfy.sh or self-hosted with an access token |
+| **MQTT** | Built-in client (no extra installs): any broker message is a trigger — match the topic (`+`/`#` wildcards) and the whole message or one JSON field that *changes* (Zigbee2MQTT motion/doors/buttons, Tasmota, ESPHome, Frigate, rtl_433, OwnTracks); "📡 MQTT message" step publishes commands. Works with "for N minutes" (no motion for 10 min) |
 | **Web** | Inbound `/hooks/<name>` (IFTTT, Zapier, Tasker, HA `rest_command`); outbound "Call a URL" step with `{{variables}}` |
 
 All machine endpoints (`/hooks`, `/run`, `/mode`, `/ask`, `/mcp`, `/webhooks/plex`) require the secret key shown in Connections
@@ -57,7 +58,7 @@ groups and workflows you've given a voice name.
 | `src/scheduler.js`, `src/solar.js` | time/sun triggers, sun & moon math |
 | `src/auth.js` | accounts & sessions |
 | `src/tools.js`, `src/mcp.js`, `src/agent.js` | AI tools, MCP server, Claude assistant |
-| `src/integrations/` | plex, hue, govee, homeassistant, alexa |
+| `src/integrations/` | plex, hue, govee, homeassistant, alexa, mqtt |
 | `public/` | UI (plain HTML/JS) |
 | `INTEGRATIONS.md` | research: smart-home platforms, top HA integrations, brands |
 | `ROADMAP.md` | what's next |

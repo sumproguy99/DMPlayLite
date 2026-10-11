@@ -24,7 +24,11 @@ TRIGGERS (source → event → optional filters):
 - webhook → any name, fired by GET/POST /hooks/<name>?key=… (Siri Shortcuts, IFTTT, Zapier, Home Assistant).
 - voice → alexa. Filter: device (spoken device name).
 - mode → mode.changed (the house mode was switched). Filters: to, from (mode names, see get_mode).
-"forMin": N on a plex, network, homeassistant or mode trigger = only if it STAYS that way for N minutes
+- mqtt → message. "topic" (MQTT wildcards + and # allowed, see mqtt_topics) and EITHER "payload" (whole message equals, e.g. "ON")
+  OR "field" (JSON key, dots for nesting) with optional "value" — a field trigger fires when that field CHANGES (to "value").
+  Zigbee2MQTT motion: {"source":"mqtt","event":"message","topic":"zigbee2mqtt/Hall motion","field":"occupancy","value":"true"}
+  No motion for 10 min: same with "value":"false","forMin":10. Templates: {{topic}}, {{payload}}, {{json.temperature}}.
+"forMin": N on a plex, network, homeassistant, mode or mqtt trigger = only if it STAYS that way for N minutes
   (e.g. door open 10 min: {"source":"homeassistant","event":"state","entity":"front_door","to":"on","forMin":10};
   phone gone 30 min: {"source":"network","event":"device.offline","device":"iPhone","forMin":30}). Waits reset on restart.
 CONDITIONS: timeWindow {"from":"HH:MM","to":"HH:MM"} · dark: true (after sunset/before sunrise) · light: true · fullMoon: true ·
@@ -39,6 +43,7 @@ STEPS:
 - {"type":"ha","service":"switch.turn_on","data":{"entity_id":"switch.fan"}}
 - {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy; optional "topic" overrides the default set under Connections; priority 1-5, 5 = urgent)
 - {"type":"mode","mode":"movie"}   (switch the house mode; this can trigger other workflows)
+- {"type":"mqtt","topic":"zigbee2mqtt/Lamp/set","payload":{"state":"ON"},"retain":false}   (publish; payload may be text or JSON, {{variables}} work)
 - {"type":"capture","scene":"Before movie","targets":[optional override]}   (save how the lights look right now as a scene; same name = replace)
 - {"type":"scene","scene":"Before movie","transitionMs":3000}   (put the lights back the way that scene saved them; see list_scenes)
 SCENES remember brightness + white temperature or color per light. "Remember how the room was and restore it after the movie" =
@@ -51,6 +56,7 @@ export function normalizeWorkflow(w) {
   if (w.orTriggers != null && !Array.isArray(w.orTriggers)) throw new Error('orTriggers must be a list of triggers');
   if (w.orTriggers?.some((t) => !t?.source || !t?.event)) throw new Error('Every extra trigger needs a source and an event');
   if (w.orTriggers && !w.orTriggers.length) delete w.orTriggers;
+  if ([w.trigger, ...(w.orTriggers ?? [])].some((t) => t.source === 'mqtt' && !String(t.topic ?? '').trim())) throw new Error('MQTT trigger needs a topic');
   for (const t of [w.trigger, ...(w.orTriggers ?? [])]) {
     if (t.forMin == null || t.forMin === '' || t.forMin === 0) {
       delete t.forMin;
@@ -67,7 +73,7 @@ export function normalizeWorkflow(w) {
   }
   if (!Array.isArray(w.steps) || !w.steps.length) throw new Error('Workflow needs at least one step');
   for (const s of w.steps) {
-    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode', 'scene', 'capture'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
+    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode', 'scene', 'capture', 'mqtt'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
     if (s.type === 'pulse') {
       s.levels ??= [100, 70, 100];
       s.times ??= 3;
@@ -76,6 +82,7 @@ export function normalizeWorkflow(w) {
     if (s.type === 'http' && !/^https?:\/\//.test(s.url ?? '')) throw new Error('http step needs a full http(s) URL');
     if (s.type === 'ha' && !/^\w+\.\w+$/.test(s.service ?? '')) throw new Error('ha step needs a service like "light.turn_on"');
     if (s.type === 'mode' && !String(s.mode ?? '').trim()) throw new Error('mode step needs a mode, e.g. "movie"');
+    if (s.type === 'mqtt' && (!String(s.topic ?? '').trim() || /[+#]/.test(s.topic))) throw new Error('mqtt step needs a plain topic (no + or # wildcards)');
     if ((s.type === 'scene' || s.type === 'capture') && !String(s.scene ?? '').trim()) throw new Error(`${s.type} step needs a scene name`);
     if (s.type === 'notify') {
       if (!String(s.message ?? '').trim()) throw new Error('notify step needs a message');
@@ -87,7 +94,7 @@ export function normalizeWorkflow(w) {
 }
 
 export function createTools(ctx) {
-  const { getConfig, updateConfig, engine, lights, discovery, ha, log } = ctx;
+  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, log } = ctx;
   const findRoutine = (q) => {
     const rs = getConfig().routines;
     const s = String(q ?? '').toLowerCase();
@@ -219,6 +226,25 @@ export function createTools(ctx) {
       description: 'Set the lights back to a saved scene, optionally fading over transitionMs.',
       inputSchema: { type: 'object', properties: { scene: { type: 'string' }, transitionMs: { type: 'number' } }, required: ['scene'], additionalProperties: false },
       run: async (a) => ({ ok: true, scene: (await engine.applyScene(a.scene, a.transitionMs ?? 0)).name }),
+    },
+    {
+      name: 'mqtt_topics',
+      description: 'MQTT topics seen recently on the broker, newest first, with their last message (use to find Zigbee2MQTT / Tasmota / Frigate topics and JSON fields). Optional text filter.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string' } }, additionalProperties: false },
+      run: async (a) => {
+        if (!mqtt?.status.connected) throw new Error('MQTT is not connected — set it up under Connections → MQTT');
+        return mqtt.recent(a.query ?? '').slice(0, 60);
+      },
+    },
+    {
+      name: 'mqtt_publish',
+      description: 'Publish an MQTT message, e.g. topic "zigbee2mqtt/Lamp/set" payload {"state":"TOGGLE"}, or "cmnd/plug/POWER" payload "ON".',
+      inputSchema: { type: 'object', properties: { topic: { type: 'string' }, payload: {}, retain: { type: 'boolean' } }, required: ['topic'], additionalProperties: false },
+      run: async (a) => {
+        if (!mqtt) throw new Error('MQTT is not set up');
+        mqtt.publish(a.topic, a.payload, { retain: a.retain });
+        return { ok: true };
+      },
     },
     {
       name: 'list_network_devices',

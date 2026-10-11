@@ -13,20 +13,38 @@
 // Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click} · mode {mode}
 import { Token, contains, randomId, sleep } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
+import { topicMatches } from './integrations/mqtt.js';
 
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
 export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
 // "…and it stays that way for N minutes" — only for triggers that describe a state that can end.
-export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode'];
+export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode', 'mqtt'];
 export const canHold = (t) => HOLD_SOURCES.includes(t?.source) && !['device.new', 'media.scrobble'].includes(t.event);
 // What an event is about: one HA entity, one network device, one Plex player (player vs media state), the house mode.
-export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? ''}`;
+export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? e.topic ?? ''}`;
 export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device));
 // Condition groups that actually check something: "conditions" OR any of "orConditions".
 export const conditionGroups = (routine) => [routine.conditions, ...(routine.orConditions ?? [])].filter(hasConditions);
 
-export function matchesTrigger(trigger, event) {
+const sameValue = (a, b) => String(a !== null && typeof a === 'object' ? JSON.stringify(a) : a).trim().toLowerCase() === String(b).trim().toLowerCase();
+const pathOf = (obj, path) => String(path).split('.').reduce((o, k) => o?.[k], obj);
+
+// MQTT: topic (with + / # wildcards), then either the whole payload or one JSON field.
+// A field trigger fires when that field CHANGES (Zigbee2MQTT resends every field on each update);
+// ignoreChange is for "does this still hold?" checks during a "for N minutes" wait.
+function matchesMqtt(t, e, { ignoreChange = false } = {}) {
+  if (!topicMatches(t.topic, e.topic)) return false;
+  if (!t.field) return t.payload == null || t.payload === '' || sameValue(e.payload, t.payload);
+  const now = pathOf(e.json, t.field);
+  if (now === undefined) return false;
+  if (t.value != null && t.value !== '' && !sameValue(now, t.value)) return false;
+  if (!ignoreChange && e.prevJson !== undefined && sameValue(pathOf(e.prevJson, t.field), now)) return false;
+  return true;
+}
+
+export function matchesTrigger(trigger, event, opts) {
   if (!trigger || trigger.source !== event.source || trigger.event !== event.type) return false;
+  if (trigger.source === 'mqtt') return matchesMqtt(trigger, event, opts);
   if (trigger.player && !contains(event.player, trigger.player)) return false;
   if (trigger.user && !contains(event.user, trigger.user)) return false;
   if (trigger.mediaTypes?.length && event.mediaType && !trigger.mediaTypes.includes(event.mediaType)) return false;
@@ -89,13 +107,14 @@ export class Engine {
   #modeChanges = []; // timestamps, to stop workflows flipping the mode back and forth forever
   #holds = new Map(); // routine|trigger|subject -> { timer, trigger, subject, name } for "for N minutes" triggers
 
-  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null }) {
+  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null }) {
     this.getConfig = getConfig;
     this.updateConfig = updateConfig;
     this.lights = lights;
     this.log = log;
     this.discovery = discovery;
     this.ha = ha;
+    this.mqtt = mqtt;
   }
 
   // House mode: one current mode (home, away, movie…). Changing it fires { source: 'mode', type: 'mode.changed', from, to }.
@@ -122,14 +141,18 @@ export class Engine {
   }
 
   handle(event) {
-    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`]
+    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`]
       .filter(Boolean)
       .join(' ');
-    if (!event.quiet) this.log.event(`${event.source}: ${desc}`, event);
+    // chatty sources (MQTT) can send many messages a second — log only the ones that start or end something
+    let logged = event.quiet;
+    const logEvent = () => logged || ((logged = true), this.log.event(`${event.source}: ${desc}`, event));
+    if (!event.chatty) logEvent();
     // A later event about the same thing that no longer matches ends a "for N minutes" wait.
     const subject = subjectOf(event);
     for (const [key, h] of this.#holds) {
-      if (h.subject !== subject || event.type === 'media.scrobble' || matchesTrigger(h.trigger, event)) continue;
+      if (h.subject !== subject || event.type === 'media.scrobble' || matchesTrigger(h.trigger, event, { ignoreChange: true })) continue;
+      logEvent();
       clearTimeout(h.timer);
       this.#holds.delete(key);
       this.log.info(`⏹ "${h.name}" stopped waiting — it changed before ${h.trigger.forMin} min`);
@@ -138,6 +161,7 @@ export class Engine {
       if (!routine.enabled) continue;
       const matched = triggersOf(routine).map((t, i) => [t, i]).filter(([t]) => matchesTrigger(t, event));
       if (!matched.length) continue;
+      logEvent();
       if (matched.some(([t]) => !(t.forMin > 0 && canHold(t)))) this.fire(routine, event);
       else this.#hold(routine, ...matched[0], event, subject);
     }
@@ -239,6 +263,7 @@ export class Engine {
         else if (step.type === 'ha') await this.#ha(step, event);
         else if (step.type === 'notify') await this.#notify(step, event);
         else if (step.type === 'mode') this.#modeStep(step, routine);
+        else if (step.type === 'mqtt') this.#mqttStep(step, event);
         else if (step.type === 'capture') await this.saveScene(step.scene, stepTargets(step)).then(({ scene }) => this.log.info(`📸 Saved scene "${scene.name}"`), (err) => this.log.error(`Save scene: ${err.message}`));
         else if (step.type === 'scene') {
           const scene = this.findScene(step.scene);
@@ -364,6 +389,17 @@ export class Engine {
       if (this.setMode(step.mode, routine.name, { byWorkflow: true })) this.log.info(`Mode → ${step.mode}`);
     } catch (err) {
       this.log.error(err.message);
+    }
+  }
+
+  #mqttStep(step, event) {
+    const topic = template(step.topic, event);
+    try {
+      if (!this.mqtt) throw new Error('MQTT is not set up');
+      this.mqtt.publish(topic, template(step.payload ?? '', event), { retain: Boolean(step.retain) });
+      this.log.info(`MQTT → ${topic}`);
+    } catch (err) {
+      this.log.error(`MQTT ${topic}: ${err.message}`);
     }
   }
 

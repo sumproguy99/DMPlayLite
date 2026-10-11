@@ -9,6 +9,7 @@ import { Auth, tokenFrom } from './auth.js';
 import { normalizeWorkflow } from './tools.js';
 import { handleMcp } from './mcp.js';
 import { moonPhase, moonName, sunTimes } from './solar.js';
+import { Mqtt } from './integrations/mqtt.js';
 
 export { lanAddresses };
 
@@ -45,7 +46,7 @@ function send(res, status, body, headers = {}) {
 }
 
 export function createServer(app) {
-  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, alexa, assistant, tools, scheduler, auth } = app;
+  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, alexa, assistant, tools, scheduler, auth } = app;
   const { getConfig, updateConfig } = config;
   let plexServers = []; // from the last sign-in; tokens stay server-side
 
@@ -67,6 +68,7 @@ export function createServer(app) {
       mode: engine.mode,
       modes: c.modes,
       waiting: engine.waiting,
+      mqtt: { url: c.mqtt.url, username: c.mqtt.username, hasPassword: Boolean(c.mqtt.password), status: mqtt.status, topics: mqtt.topics.size },
       scenes: (c.scenes ?? []).map((s) => ({ id: s.id, name: s.name, lights: Object.keys(s.lights), savedAt: s.savedAt })),
       plex: { url: c.plex.url, hasToken: Boolean(c.plex.token), pollSeconds: c.plex.pollSeconds, status: plex.status },
       hue: { bridgeIp: c.hue.bridgeIp, paired: hue.ready, candidates: discovery.list().filter((d) => d.kind === 'hue-bridge').map((d) => d.ip) },
@@ -327,6 +329,23 @@ export function createServer(app) {
     },
 
     // ---------- phone alerts (ntfy) ----------
+    'POST /api/mqtt/settings': async (req) => {
+      const body = await readJson(req);
+      const next = { ...getConfig().mqtt, url: String(body.url ?? '').trim(), username: String(body.username ?? '').trim() };
+      if (body.password != null && body.password !== '') next.password = body.password;
+      if (body.clearPassword) next.password = '';
+      if (next.url) {
+        try {
+          await Mqtt.test(next);
+        } catch (err) {
+          throw new HttpError(400, `Couldn't connect: ${err.message}`);
+        }
+      }
+      updateConfig((c) => (c.mqtt = next));
+      mqtt.restart();
+      return { ok: true };
+    },
+    'GET /api/mqtt/topics': (req, url) => mqtt.recent(url.searchParams.get('q') ?? '').slice(0, 300),
     'POST /api/ntfy/settings': async (req) => {
       const { server, topic, token } = await readJson(req);
       if (server !== undefined && server !== '' && !/^https?:\/\/[^\s/]+/.test(server)) throw new HttpError(400, 'Server must be a full http(s) URL');

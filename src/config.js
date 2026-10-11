@@ -69,6 +69,7 @@ function defaults() {
     alexa: { enabled: true, port: 80, ids: {}, hidden: [] },
     ai: { apiKey: '', model: '' },
     ntfy: { server: 'https://ntfy.sh', topic: '', token: '' },
+    mqtt: { url: '', username: '', password: '' },
     location: { lat: null, lon: null, name: '' },
     mode: 'home',
     modes: ['home', 'away', 'movie', 'sleep', 'guest'],
@@ -89,7 +90,7 @@ export function loadConfig() {
     const stored = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     const base = defaults();
     current = { ...base, ...stored };
-    for (const key of ['plex', 'hue', 'govee', 'homeassistant', 'alexa', 'ai', 'ntfy', 'location']) {
+    for (const key of ['plex', 'hue', 'govee', 'homeassistant', 'alexa', 'ai', 'ntfy', 'mqtt', 'location']) {
       current[key] = { ...base[key], ...stored[key] };
     }
   } else {
