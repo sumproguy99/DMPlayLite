@@ -66,6 +66,7 @@ export function createServer(app) {
       groups: c.groups,
       mode: engine.mode,
       modes: c.modes,
+      waiting: engine.waiting,
       plex: { url: c.plex.url, hasToken: Boolean(c.plex.token), pollSeconds: c.plex.pollSeconds, status: plex.status },
       hue: { bridgeIp: c.hue.bridgeIp, paired: hue.ready, candidates: discovery.list().filter((d) => d.kind === 'hue-bridge').map((d) => d.ip) },
       govee: { multicastInterface: c.govee.multicastInterface, devices: govee.list() },

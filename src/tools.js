@@ -1,6 +1,6 @@
 // Tools that AI agents can use — shared by the MCP server (/mcp) and the built-in Claude assistant.
 import { randomId } from './util.js';
-import { hasConditions } from './engine.js';
+import { hasConditions, canHold } from './engine.js';
 
 export const WORKFLOW_GUIDE = `A Playlite workflow is JSON:
 {
@@ -24,6 +24,9 @@ TRIGGERS (source → event → optional filters):
 - webhook → any name, fired by GET/POST /hooks/<name>?key=… (Siri Shortcuts, IFTTT, Zapier, Home Assistant).
 - voice → alexa. Filter: device (spoken device name).
 - mode → mode.changed (the house mode was switched). Filters: to, from (mode names, see get_mode).
+"forMin": N on a plex, network, homeassistant or mode trigger = only if it STAYS that way for N minutes
+  (e.g. door open 10 min: {"source":"homeassistant","event":"state","entity":"front_door","to":"on","forMin":10};
+  phone gone 30 min: {"source":"network","event":"device.offline","device":"iPhone","forMin":30}). Waits reset on restart.
 CONDITIONS: timeWindow {"from":"HH:MM","to":"HH:MM"} · dark: true (after sunset/before sunrise) · light: true · fullMoon: true ·
   presence {"device": "iPhone", "state": "home"|"away"} · mode: "movie" or ["movie","sleep"] (current house mode is one of these).
   Checks inside one group are AND. For OR use orConditions, e.g. "after dark OR in movie mode" →
@@ -44,6 +47,15 @@ export function normalizeWorkflow(w) {
   if (w.orTriggers != null && !Array.isArray(w.orTriggers)) throw new Error('orTriggers must be a list of triggers');
   if (w.orTriggers?.some((t) => !t?.source || !t?.event)) throw new Error('Every extra trigger needs a source and an event');
   if (w.orTriggers && !w.orTriggers.length) delete w.orTriggers;
+  for (const t of [w.trigger, ...(w.orTriggers ?? [])]) {
+    if (t.forMin == null || t.forMin === '' || t.forMin === 0) {
+      delete t.forMin;
+      continue;
+    }
+    if (!(Number(t.forMin) > 0)) throw new Error('forMin must be a positive number of minutes');
+    if (!canHold(t)) throw new Error(`"for N minutes" only works with Plex, network, Home Assistant and house-mode triggers (not ${t.source} ${t.event})`);
+    t.forMin = Number(t.forMin);
+  }
   if (w.orConditions != null && !Array.isArray(w.orConditions)) throw new Error('orConditions must be a list of condition groups');
   if (w.orConditions) {
     w.orConditions = w.orConditions.filter(hasConditions);

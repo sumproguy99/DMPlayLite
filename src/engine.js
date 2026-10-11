@@ -16,6 +16,11 @@ import { isDark, isFullMoon } from './solar.js';
 
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
 export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
+// "…and it stays that way for N minutes" — only for triggers that describe a state that can end.
+export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode'];
+export const canHold = (t) => HOLD_SOURCES.includes(t?.source) && !['device.new', 'media.scrobble'].includes(t.event);
+// What an event is about: one HA entity, one network device, one Plex player (player vs media state), the house mode.
+export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? ''}`;
 export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device));
 // Condition groups that actually check something: "conditions" OR any of "orConditions".
 export const conditionGroups = (routine) => [routine.conditions, ...(routine.orConditions ?? [])].filter(hasConditions);
@@ -79,6 +84,7 @@ export class Engine {
   #lastRun = new Map(); // routine id -> timestamp
 
   #modeChanges = []; // timestamps, to stop workflows flipping the mode back and forth forever
+  #holds = new Map(); // routine|trigger|subject -> { timer, trigger, subject, name } for "for N minutes" triggers
 
   constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null }) {
     this.getConfig = getConfig;
@@ -117,9 +123,42 @@ export class Engine {
       .filter(Boolean)
       .join(' ');
     if (!event.quiet) this.log.event(`${event.source}: ${desc}`, event);
-    for (const routine of this.getConfig().routines) {
-      if (routine.enabled && triggersOf(routine).some((t) => matchesTrigger(t, event))) this.fire(routine, event);
+    // A later event about the same thing that no longer matches ends a "for N minutes" wait.
+    const subject = subjectOf(event);
+    for (const [key, h] of this.#holds) {
+      if (h.subject !== subject || event.type === 'media.scrobble' || matchesTrigger(h.trigger, event)) continue;
+      clearTimeout(h.timer);
+      this.#holds.delete(key);
+      this.log.info(`⏹ "${h.name}" stopped waiting — it changed before ${h.trigger.forMin} min`);
     }
+    for (const routine of this.getConfig().routines) {
+      if (!routine.enabled) continue;
+      const matched = triggersOf(routine).map((t, i) => [t, i]).filter(([t]) => matchesTrigger(t, event));
+      if (!matched.length) continue;
+      if (matched.some(([t]) => !(t.forMin > 0 && canHold(t)))) this.fire(routine, event);
+      else this.#hold(routine, ...matched[0], event, subject);
+    }
+  }
+
+  // Start (or keep) a "for N minutes" wait; when it runs out the workflow fires as if the event just happened.
+  #hold(routine, trigger, i, event, subject) {
+    const key = `${routine.id}|${i}|${subject}`;
+    if (this.#holds.has(key)) return; // already waiting — keep the original start time
+    const timer = setTimeout(() => {
+      this.#holds.delete(key);
+      const current = this.getConfig().routines.find((r) => r.id === routine.id);
+      // skip if the workflow was turned off, deleted, or its trigger edited meanwhile
+      if (!current?.enabled || JSON.stringify(triggersOf(current)[i]) !== JSON.stringify(trigger)) return;
+      this.fire(current, { ...event, heldMin: trigger.forMin });
+    }, trigger.forMin * 60_000);
+    timer.unref?.();
+    this.#holds.set(key, { timer, trigger, subject, name: routine.name });
+    this.log.info(`⏳ "${routine.name}" runs if it stays that way for ${trigger.forMin} min`);
+  }
+
+  // Workflows currently waiting out a "for N minutes" trigger.
+  get waiting() {
+    return [...this.#holds.values()].map((h) => ({ name: h.name, forMin: h.trigger.forMin, subject: h.subject.split('|')[2] }));
   }
 
   // Check conditions + cooldown, then run. Used by handle() and by the scheduler.

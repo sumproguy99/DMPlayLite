@@ -274,3 +274,39 @@ test('condition groups: conditions OR any orConditions group', () => {
   assert.equal('orConditions' in w2, false);
   assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'x', event: 'y' }, orConditions: { dark: true }, steps: [{ type: 'wait' }] }), /orConditions must be a list/);
 });
+
+test('for N minutes: fires only if the state holds, per device, cancels on change', async () => {
+  const { engine, config } = fakeCtx();
+  const fired = [];
+  engine.fire = (r, e) => fired.push(`${r.id}:${e.entity ?? e.device}:${e.heldMin ?? 0}`);
+  const ms = 60; // forMin is minutes
+  config.routines = [
+    { id: 'door', enabled: true, name: 'Door left open', trigger: { source: 'homeassistant', event: 'state', entity: 'door', to: 'on', forMin: ms / 60000 }, steps: [] },
+    { id: 'now', enabled: true, name: 'Door opens', trigger: { source: 'homeassistant', event: 'state', entity: 'door', to: 'on' }, steps: [] },
+  ];
+  const door = (entity, to) => engine.handle({ source: 'homeassistant', type: 'state', entity, to, quiet: true });
+  door('binary_sensor.front_door', 'on');
+  door('binary_sensor.back_door', 'on');
+  assert.deepEqual(fired, ['now:binary_sensor.front_door:0', 'now:binary_sensor.back_door:0']);
+  assert.equal(engine.waiting.length, 2);
+  door('binary_sensor.front_door', 'on'); // repeat doesn't restart the wait
+  await sleep(ms / 2);
+  door('binary_sensor.back_door', 'off'); // closed in time → cancelled
+  await sleep(ms);
+  assert.deepEqual(fired.filter((f) => f.startsWith('door')), [`door:binary_sensor.front_door:${ms / 60000}`]);
+  assert.equal(engine.waiting.length, 0);
+
+  // a disabled workflow doesn't fire when its wait ends
+  door('binary_sensor.front_door', 'off');
+  door('binary_sensor.front_door', 'on');
+  config.routines[0] = { ...config.routines[0], enabled: false };
+  await sleep(ms * 1.5);
+  assert.equal(fired.filter((f) => f.startsWith('door')).length, 1);
+
+  // validation
+  const base = { name: 'a', steps: [{ type: 'wait', ms: 0 }] };
+  assert.equal(normalizeWorkflow({ ...base, trigger: { source: 'network', event: 'device.offline', forMin: '30' } }).trigger.forMin, 30);
+  assert.equal('forMin' in normalizeWorkflow({ ...base, trigger: { source: 'network', event: 'device.offline', forMin: '' } }).trigger, false);
+  assert.throws(() => normalizeWorkflow({ ...base, trigger: { source: 'time', event: 'time.at', at: '10:00', forMin: 5 } }), /only works with/);
+  assert.throws(() => normalizeWorkflow({ ...base, trigger: { source: 'mode', event: 'mode.changed', forMin: -1 } }), /positive/);
+});

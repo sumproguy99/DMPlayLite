@@ -200,6 +200,7 @@ function describeTrigger(tr) {
   if (tr.device) bits.push(`— ${b(tr.device)}`);
   if (tr.user) bits.push(`by ${b(tr.user)}`);
   if (tr.mediaTypes?.length && tr.mediaTypes.length < 4) bits.push(`(${tr.mediaTypes.join(', ')})`);
+  if (tr.forMin > 0) bits.push(`for ${b(`${tr.forMin} min`)}`);
   return `<span class="src-icon">${src?.icon ?? '⚡'}</span> ${bits.join(' ')}`;
 }
 
@@ -247,6 +248,7 @@ function renderRoutines() {
               <label class="switch" title="On/off"><input type="checkbox" data-toggle="${i}" ${r.enabled ? 'checked' : ''}><span></span></label>
               <h3>${esc(r.name)}</h3>
               ${r.voiceName ? `<span class="chip" title="Alexa / Siri name">🗣 “${esc(r.voiceName)}”</span>` : ''}
+              ${(S.state.waiting ?? []).filter((w) => w.name === r.name).map((w) => `<span class="chip" title="Runs if it stays that way">⏳ waiting ${w.forMin} min${w.subject ? ` · ${esc(w.subject)}` : ''}</span>`).join('')}
             </div>
             <div class="row">
               <button class="btn sm" data-run="${esc(r.id)}">Run now</button>
@@ -318,7 +320,21 @@ function targetPicker(selected, path) {
     <span>${esc(o.name)}<br><small>${esc(o.note)}</small></span></label>`).join('')}</div>`;
 }
 
+// Same rule as the engine: only triggers describing a state that can end can "stay that way".
+const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode'].includes(tr.source) && !['device.new', 'media.scrobble'].includes(tr.event);
+
 function triggerFields(tr, base = 'trigger') {
+  if (!canHold(tr)) {
+    delete tr.forMin;
+    return sourceFields(tr, base);
+  }
+  return `${sourceFields(tr, base)}
+      <div class="fields" style="margin-top:10px">
+        <label class="field">…and it stays that way for <small>(minutes, optional)</small><input type="number" min="0" step="any" data-bind="${base}.forMin" data-type="num" value="${tr.forMin ?? ''}" placeholder="run right away"></label>
+      </div>`;
+}
+
+function sourceFields(tr, base) {
   const ev = EVENTS[tr.source] ?? [];
   const eventSelect = ev.length
     ? `<label class="field grow">What happens<select data-bind="${base}.event" data-rerender>${ev.map(([k, n]) => `<option value="${k}" ${tr.event === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`
@@ -1230,8 +1246,10 @@ try {
 if (saved && saved !== 'routines' && document.getElementById(`tab-${saved}`)) showTab(saved);
 
 setInterval(() => api('GET', '/api/state').then((s) => {
-  Object.assign(S.state, { mode: s.mode, modes: s.modes, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
+  const waitingChanged = JSON.stringify(s.waiting) !== JSON.stringify(S.state.waiting);
+  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
   renderHeader();
+  if (waitingChanged && !$('#idea')?.value) renderRoutines(); // don't wipe an idea being typed
 }).catch(() => {}), 10_000);
 setInterval(() => {
   if ($('#tab-network').classList.contains('active')) refreshNetwork().catch(() => {});
