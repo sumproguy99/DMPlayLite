@@ -130,3 +130,14 @@ export async function fetchJson(url, { timeoutMs = 5000, ...init } = {}) {
 export function redact(url) {
   return String(url).replace(/(X-Plex-Token=)[^&]+/i, '$1***').replace(/(\/api\/)[A-Za-z0-9-]{20,}/, '$1***');
 }
+
+// "{{player}} started {{title}}" -> values from the triggering event.
+export function template(value, event) {
+  if (typeof value === 'string') return value.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, k) => String(k.split('.').reduce((o, p) => o?.[p], event) ?? ''));
+  if (Array.isArray(value)) return value.map((v) => template(v, event));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, template(v, event)]));
+  return value;
+}
+
+// Loose equality for trigger filters: case-insensitive, objects compared as JSON ("true" matches true).
+export const sameValue = (a, b) => String(a !== null && typeof a === 'object' ? JSON.stringify(a) : a).trim().toLowerCase() === String(b).trim().toLowerCase();

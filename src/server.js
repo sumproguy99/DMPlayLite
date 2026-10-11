@@ -1,7 +1,6 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 import { randomId, fetchJson } from './util.js';
 import { lanAddresses } from './net.js';
@@ -9,7 +8,9 @@ import { Auth, tokenFrom } from './auth.js';
 import { normalizeWorkflow } from './tools.js';
 import { handleMcp } from './mcp.js';
 import { moonPhase, moonName, sunTimes } from './solar.js';
-import { Mqtt } from './integrations/mqtt.js';
+import { PLUGINS } from './plugins/index.js';
+import { canHold } from './engine.js';
+import { HttpError, readBody, readJson, send } from './http-utils.js';
 
 export { lanAddresses };
 
@@ -18,37 +19,23 @@ const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; cha
 // Reachable without logging in (the login page itself, and machine endpoints guarded by the key).
 const OPEN_FILES = new Set(['/login.html', '/style.css', '/favicon.svg']);
 
-class HttpError extends Error {
-  constructor(status, message) {
-    super(message);
-    this.status = status;
-  }
-}
-
-async function readBody(req) {
-  const chunks = [];
-  for await (const c of req) chunks.push(c);
-  return Buffer.concat(chunks).toString();
-}
-async function readJson(req) {
-  const text = await readBody(req);
-  if (!text) return {};
-  try {
-    return JSON.parse(text);
-  } catch {
-    throw new HttpError(400, 'Invalid JSON body');
-  }
-}
-
-function send(res, status, body, headers = {}) {
-  res.writeHead(status, { 'Content-Type': 'application/json', ...headers });
-  res.end(JSON.stringify(body));
-}
-
 export function createServer(app) {
-  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, wled, hueSensors, weather, frigate, presence, alexa, assistant, tools, scheduler, auth } = app;
+  const { config, lights, engine, log, port, discovery, services, assistant, tools, scheduler, auth } = app;
   const { getConfig, updateConfig } = config;
-  let plexServers = []; // from the last sign-in; tokens stay server-side
+  // what plugin routes / keyed handlers get (plus their own service)
+  const pluginCtx = { getConfig, updateConfig, log, discovery, engine, lights, services };
+  const active = PLUGINS.filter((p) => services[p.id]);
+  // keyed machine endpoints that plugins add (e.g. /webhooks/plex, /presence/…)
+  const keyedPlugin = (p) => active.find((x) => x.keyed?.paths?.includes(p) || x.keyed?.prefixes?.some((pre) => p.startsWith(pre)));
+  // which trigger events can use "…for N minutes", for the UI
+  const holdable = () => {
+    const out = { network: ['device.online', 'device.offline'], mode: ['mode.changed'] };
+    for (const p of PLUGINS) {
+      const ev = (p.trigger?.events ?? []).filter((event) => canHold({ source: p.trigger.source, event }));
+      if (ev.length) out[p.trigger.source] = ev;
+    }
+    return out;
+  };
 
   const keyOk = (req, url) => {
     const k = url.searchParams.get('key') ?? /^Bearer (.+)$/.exec(req.headers.authorization ?? '')?.[1];
@@ -68,28 +55,14 @@ export function createServer(app) {
       mode: engine.mode,
       modes: c.modes,
       waiting: engine.waiting,
-      rokus: engine.roku?.devices() ?? [],
-      mqtt: { url: c.mqtt.url, username: c.mqtt.username, hasPassword: Boolean(c.mqtt.password), status: mqtt.status, topics: mqtt.topics.size },
       scenes: (c.scenes ?? []).map((s) => ({ id: s.id, name: s.name, lights: Object.keys(s.lights), savedAt: s.savedAt })),
-      plex: { url: c.plex.url, hasToken: Boolean(c.plex.token), pollSeconds: c.plex.pollSeconds, status: plex.status },
-      hue: { bridgeIp: c.hue.bridgeIp, paired: hue.ready, candidates: discovery.list().filter((d) => d.kind === 'hue-bridge').map((d) => d.ip), sensors: { ...hueSensors.status, devices: hueSensors.sensors() } },
-      wled: { devices: Object.entries(c.wled.devices).map(([id, d]) => ({ id, ...d })), candidates: discovery.list().filter((d) => d.kind === 'wled' && !Object.values(c.wled.devices).some((w) => w.ip === d.ip)).map((d) => ({ ip: d.ip, name: d.name })) },
-      govee: { multicastInterface: c.govee.multicastInterface, devices: govee.list() },
-      homeassistant: {
-        url: c.homeassistant.url,
-        hasToken: Boolean(c.homeassistant.token),
-        status: ha.status,
-        candidates: discovery.list().filter((d) => d.kind === 'home-assistant').map((d) => d.txt?.internal_url || d.txt?.base_url || `http://${d.ip}:8123`),
-      },
-      alexa: { enabled: c.alexa.enabled !== false, port: c.alexa.port ?? 80, status: alexa.status, items: alexa.items().map(({ id, key, name, kind }) => ({ id, key, name, kind })), hidden: c.alexa.hidden ?? [] },
       ai: { ready: assistant.ready, model: assistant.model, fromEnv: Boolean(process.env.ANTHROPIC_API_KEY) },
       ntfy: { server: c.ntfy.server, topic: c.ntfy.topic, hasToken: Boolean(c.ntfy.token) },
       location: c.location,
       sky: { sunrise: sun?.sunrise, sunset: sun?.sunset, moon: moonName(phase), moonPhase: phase },
-      weather: weather?.summary() ?? null,
-      people: presence?.summary() ?? [],
-      frigate: { url: c.frigate?.url ?? '', username: c.frigate?.username ?? '', hasPassword: Boolean(c.frigate?.password), topicPrefix: c.frigate?.topicPrefix || 'frigate', status: frigate?.status ?? {}, cameras: frigate?.cameras ?? [], recent: frigate?.recent ?? [] },
       network: { status: discovery.status, online: discovery.list().filter((d) => d.online).length, total: discovery.devices.size },
+      holdable: holdable(),
+      ...Object.assign({}, ...active.map((p) => p.state?.(services[p.id], { config: c, discovery }) ?? {})),
       urls: {
         ui: base.slice(0, 1),
         plexWebhook: base.map((b) => `${b}/webhooks/plex?key=${key}`),
@@ -231,222 +204,10 @@ export function createServer(app) {
       const { lat, lon, name } = await readJson(req);
       if (!Number.isFinite(+lat) || !Number.isFinite(+lon)) throw new HttpError(400, 'Latitude and longitude required');
       updateConfig((c) => (c.location = { lat: +lat, lon: +lon, name: name ?? '' }));
-      weather?.restart();
+      services.weather?.restart();
       return { ok: true };
     },
-    'POST /api/weather/settings': async (req) => {
-      const { enabled, units, alerts } = await readJson(req);
-      updateConfig((c) => {
-        c.weather = { ...c.weather };
-        if (enabled != null) c.weather.enabled = Boolean(enabled);
-        if (units) c.weather.units = units === 'c' ? 'c' : 'f';
-        if (alerts != null) c.weather.alerts = Boolean(alerts);
-      });
-      weather?.restart();
-      return { ok: true };
-    },
-
-    // ---------- Plex ----------
-    'POST /api/plex/pin': () => plex.createPin(),
-    'POST /api/plex/pin/check': async (req) => {
-      const { id } = await readJson(req);
-      const token = await plex.checkPin(id);
-      if (!token) return { done: false };
-      plexServers = await plex.listServers(token);
-      return { done: true, servers: plexServers.map(({ name, connections }, i) => ({ index: i, name, connections })) };
-    },
-    'POST /api/plex/settings': async (req) => {
-      const body = await readJson(req);
-      updateConfig((c) => {
-        if (body.serverIndex != null) {
-          const s = plexServers[body.serverIndex];
-          if (!s) throw new HttpError(400, 'Sign in again — server list expired');
-          c.plex.token = s.token;
-        }
-        if (body.token) c.plex.token = body.token;
-        if (body.url) c.plex.url = body.url.replace(/\/+$/, '');
-        if (body.pollSeconds) c.plex.pollSeconds = Number(body.pollSeconds);
-      });
-      plex.restart();
-      await plex.refreshSessions();
-      return { ok: true, status: plex.status };
-    },
-
-    // ---------- Hue ----------
-    'POST /api/hue/discover': async () => {
-      // Candidates from discovery (+ Philips MAC prefixes) and Philips' cloud lookup; keep only real bridges.
-      const ips = new Set(discovery.list().filter((d) => d.kind === 'hue-bridge' || d.vendor === 'Philips Hue').map((d) => d.ip));
-      for (const b of await hue.discover().catch(() => [])) ips.add(b.ip);
-      const checked = await Promise.all([...ips].map(async (ip) => {
-        const cfg = await fetchJson(`http://${ip}/api/config`, { timeoutMs: 2500 }).catch(() => null);
-        return cfg?.bridgeid ? { id: cfg.bridgeid, ip, name: cfg.name } : null;
-      }));
-      return checked.filter(Boolean);
-    },
-    'POST /api/hue/pair': async (req) => {
-      const { ip } = await readJson(req);
-      if (!ip) throw new HttpError(400, 'Bridge IP required');
-      const username = await hue.pair(ip);
-      updateConfig((c) => (c.hue = { bridgeIp: ip, username }));
-      log.info(`Hue: paired with bridge at ${ip}`);
-      hueSensors.restart();
-      return { ok: true };
-    },
-
-    // ---------- WLED ----------
-    'POST /api/wled/add': async (req) => {
-      const { ip } = await readJson(req);
-      try {
-        return { ok: true, id: await wled.add(ip) };
-      } catch (err) {
-        throw new HttpError(400, err.message);
-      }
-    },
-    'POST /api/wled/rename': async (req) => {
-      const { id, name } = await readJson(req);
-      wled.rename(id, name);
-      return { ok: true };
-    },
-    'POST /api/wled/remove': async (req) => {
-      const { id } = await readJson(req);
-      wled.remove(id);
-      return { ok: true };
-    },
-
-    // ---------- Govee ----------
-    'POST /api/govee/scan': async () => ({ found: await govee.scan(), devices: govee.list() }),
-    'POST /api/govee/add': async (req) => {
-      const { ip } = await readJson(req);
-      await govee.addByIp(ip);
-      return { devices: govee.list() };
-    },
-    'POST /api/govee/rename': async (req) => {
-      const { id, name } = await readJson(req);
-      updateConfig((c) => {
-        if (!c.govee.devices[id]) throw new HttpError(404, 'No such device');
-        c.govee.devices[id].name = name;
-      });
-      return { devices: govee.list() };
-    },
-    'POST /api/govee/remove': async (req) => {
-      const { id } = await readJson(req);
-      updateConfig((c) => delete c.govee.devices[id]);
-      return { devices: govee.list() };
-    },
-    'POST /api/govee/settings': async (req) => {
-      const { multicastInterface } = await readJson(req);
-      updateConfig((c) => (c.govee.multicastInterface = multicastInterface ?? ''));
-      govee.stop();
-      govee.start();
-      return { ok: true };
-    },
-
-    // ---------- Home Assistant ----------
-    'POST /api/ha/settings': async (req) => {
-      const { url: haUrl, token } = await readJson(req);
-      const u = (haUrl ?? '').replace(/\/+$/, '');
-      const t = token || getConfig().homeassistant.token;
-      if (!u || !t) throw new HttpError(400, 'Home Assistant URL and access token are required');
-      const info = await ha.test(u, t).catch((err) => {
-        throw new HttpError(400, `Couldn't connect: ${err.message.replace(/ -> /, ' → ')}`);
-      });
-      updateConfig((c) => {
-        c.homeassistant = { url: u, token: t };
-        if (!c.location?.lat && info.latitude) c.location = { lat: info.latitude, lon: info.longitude, name: info.location };
-      });
-      if (!weather?.current) weather?.restart();
-      ha.restart();
-      return { ok: true, info };
-    },
-    'GET /api/ha/entities': (req, url) => ha.entities(url.searchParams.get('q') ?? '', url.searchParams.get('domain') ?? '').slice(0, 300),
-
-    // ---------- Alexa ----------
-    'POST /api/alexa/settings': async (req) => {
-      const body = await readJson(req);
-      updateConfig((c) => (c.alexa = { ...c.alexa, ...('enabled' in body ? { enabled: body.enabled } : {}), ...(body.port ? { port: +body.port } : {}), ...(body.hidden ? { hidden: body.hidden } : {}) }));
-      alexa.stop();
-      alexa.start();
-      return { ok: true };
-    },
-
     // ---------- phone alerts (ntfy) ----------
-    'POST /api/mqtt/settings': async (req) => {
-      const body = await readJson(req);
-      const next = { ...getConfig().mqtt, url: String(body.url ?? '').trim(), username: String(body.username ?? '').trim() };
-      if (body.password != null && body.password !== '') next.password = body.password;
-      if (body.clearPassword) next.password = '';
-      if (next.url) {
-        try {
-          await Mqtt.test(next);
-        } catch (err) {
-          throw new HttpError(400, `Couldn't connect: ${err.message}`);
-        }
-      }
-      updateConfig((c) => (c.mqtt = next));
-      mqtt.restart();
-      return { ok: true };
-    },
-    'POST /api/frigate/settings': async (req) => {
-      const body = await readJson(req);
-      const url = String(body.url ?? '').trim().replace(/\/+$/, '');
-      if (url && !/^https?:\/\/[^\s/]+$/.test(url)) throw new HttpError(400, 'Frigate address must look like http://192.168.1.20:5000');
-      const next = { ...getConfig().frigate, url, username: String(body.username ?? '').trim(), topicPrefix: String(body.topicPrefix ?? '').trim() || 'frigate' };
-      if (body.password != null && body.password !== '') next.password = body.password;
-      if (!next.username) next.password = '';
-      let found = null;
-      if (url) {
-        try {
-          found = await frigate.load(next);
-        } catch (err) {
-          throw new HttpError(400, `Couldn't connect: ${err.message}`);
-        }
-      }
-      updateConfig((c) => (c.frigate = next));
-      await frigate.restart();
-      return { ok: true, ...found };
-    },
-    'PUT /api/people': async (req) => {
-      const list = await readJson(req);
-      if (!Array.isArray(list)) throw new HttpError(400, 'Expected a list of people');
-      const old = getConfig().people ?? [];
-      const ids = new Set();
-      const people = list.map((p) => {
-        const name = String(p.name ?? '').trim();
-        if (!name) throw new HttpError(400, 'Every person needs a name');
-        if (/^(anyone|everyone|someone|nobody)$/i.test(name)) throw new HttpError(400, `"${name}" is reserved — pick another name`);
-        let id = p.id || name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || randomId(3);
-        while (ids.has(id)) id += '-2';
-        ids.add(id);
-        const prev = old.find((x) => x.id === id) ?? {};
-        const clean = (v) => String(v ?? '').trim();
-        return {
-          id,
-          name,
-          devices: [p.devices ?? []].flat().map(clean).filter(Boolean),
-          owntracks: clean(p.owntracks),
-          ha: clean(p.ha),
-          ...(clean(p.region) ? { region: clean(p.region) } : {}),
-          ...(Number(p.radius) > 0 ? { radius: Number(p.radius) } : {}),
-          shortcuts: Boolean(p.shortcuts ?? prev.shortcuts),
-          state: prev.state ?? 'away',
-          since: prev.since ?? null,
-          by: prev.by ?? null,
-        };
-      });
-      updateConfig((c) => (c.people = people));
-      presence.reconcile();
-      return { ok: true, people };
-    },
-    'POST /api/people/state': async (req, url, user) => {
-      const { person, state } = await readJson(req);
-      try {
-        presence.set(person, state, `${user} (manual)`);
-      } catch (err) {
-        throw new HttpError(400, err.message);
-      }
-      return { ok: true };
-    },
-    'GET /api/mqtt/topics': (req, url) => mqtt.recent(url.searchParams.get('q') ?? '').slice(0, 300),
     'POST /api/ntfy/settings': async (req) => {
       const { server, topic, token } = await readJson(req);
       if (server !== undefined && server !== '' && !/^https?:\/\/[^\s/]+/.test(server)) throw new HttpError(400, 'Server must be a full http(s) URL');
@@ -486,17 +247,15 @@ export function createServer(app) {
       return { answer: await assistant.ask(text) };
     },
   };
+  for (const p of active) Object.assign(routes, p.routes?.(services[p.id], pluginCtx));
+  const rawRoutes = Object.fromEntries(active.flatMap((p) => Object.entries(p.raw ?? {}).map(([path, fn]) => [path, (req, res, url) => fn(req, res, url, { ...pluginCtx, service: services[p.id] })])));
 
   // ---------- machine endpoints (secret key) ----------
   async function handleKeyed(req, res, url) {
     if (!keyOk(req, url)) return send(res, 403, { error: 'Missing or wrong key' });
     const p = url.pathname;
-    if (p === '/webhooks/plex') {
-      const request = new Request('http://local/', { method: 'POST', headers: { 'content-type': req.headers['content-type'] ?? '' }, body: Readable.toWeb(req), duplex: 'half' });
-      const form = await request.formData();
-      plex.handleWebhook(JSON.parse(form.get('payload')));
-      return send(res, 200, { ok: true });
-    }
+    const plugin = keyedPlugin(p);
+    if (plugin) return plugin.keyed.handle(req, res, url, { ...pluginCtx, service: services[plugin.id] });
     if (p === '/mcp') {
       if (req.method !== 'POST') return send(res, 405, { error: 'Use POST' }, { Allow: 'POST' });
       const reply = await handleMcp(JSON.parse((await readBody(req)) || 'null'), tools);
@@ -528,27 +287,6 @@ export function createServer(app) {
         return res.writeHead(400).end(err.message);
       }
       return res.writeHead(200).end(`House mode is now ${engine.mode}`);
-    }
-    if (p === '/presence/owntracks') {
-      // OwnTracks HTTP mode: URL …/presence/owntracks?key=…&person=Name; it expects a JSON list back
-      const msg = JSON.parse((await readBody(req)) || 'null');
-      try {
-        presence.owntracks(url.searchParams.get('person') ?? req.headers['x-limit-u'] ?? '', msg);
-      } catch (err) {
-        return send(res, 404, { error: err.message });
-      }
-      return send(res, 200, []);
-    }
-    if (p.startsWith('/presence/')) {
-      // iOS Shortcuts automation "When I arrive / leave home" → GET /presence/<person>/home|away
-      const [, , who, state] = p.split('/').map(decodeURIComponent);
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      try {
-        const person = presence.webhook(who, String(state).toLowerCase());
-        return res.writeHead(200).end(`${person.name} is ${state}`);
-      } catch (err) {
-        return res.writeHead(400).end(err.message);
-      }
     }
     if (p.startsWith('/scene/')) {
       // Siri: "Hey Siri, reading lights" → GET /scene/reading
@@ -609,7 +347,7 @@ export function createServer(app) {
     const url = new URL(req.url, 'http://local');
     const p = url.pathname;
     try {
-      if (p === '/webhooks/plex' || p.startsWith('/hooks/') || p.startsWith('/run/') || p.startsWith('/mode/') || p.startsWith('/scene/') || p.startsWith('/presence/') || p === '/ask' || p === '/mcp') return await handleKeyed(req, res, url);
+      if (keyedPlugin(p) || p.startsWith('/hooks/') || p.startsWith('/run/') || p.startsWith('/mode/') || p.startsWith('/scene/') || p === '/ask' || p === '/mcp') return await handleKeyed(req, res, url);
       if (['/api/auth/status', '/api/auth/login', '/api/auth/setup'].includes(p)) return await handleAuthPublic(req, res, url);
       if (OPEN_FILES.has(p)) return serveStatic(res, p);
 
@@ -621,12 +359,7 @@ export function createServer(app) {
       }
 
       if (p === '/api/log/stream') return streamLog(req, res);
-      if (p === '/api/frigate/snapshot') {
-        // live camera picture for the Connections card
-        const image = await frigate.snapshot(url.searchParams.get('camera') ?? '');
-        res.writeHead(200, { 'Content-Type': 'image/jpeg', 'Cache-Control': 'no-store' });
-        return res.end(image.data);
-      }
+      if (rawRoutes[p]) return await rawRoutes[p](req, res, url);
       const handler = routes[`${req.method} ${p}`];
       if (handler) return send(res, 200, await handler(req, url, user, res));
       if (p.startsWith('/api/')) return send(res, 404, { error: 'Unknown endpoint' });

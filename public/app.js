@@ -382,8 +382,8 @@ function targetPicker(selected, path) {
     <span>${esc(o.name)}<br><small>${esc(o.note)}</small></span></label>`).join('')}</div>`;
 }
 
-// Same rule as the engine: only triggers describing a state that can end can "stay that way".
-const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue', 'weather', 'presence'].includes(tr.source) && !['device.new', 'media.scrobble', 'button', 'alert', 'alert.ended'].includes(tr.event);
+// The engine's rule (sent in the state): only triggers describing a state that can end can "stay that way".
+const canHold = (tr) => Boolean(S.state.holdable?.[tr.source]?.includes(tr.event));
 
 function triggerFields(tr, base = 'trigger') {
   if (!canHold(tr)) {

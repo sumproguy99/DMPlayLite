@@ -66,10 +66,26 @@ groups and workflows you've given a voice name.
 | `src/scheduler.js`, `src/solar.js` | time/sun triggers, sun & moon math |
 | `src/auth.js` | accounts & sessions |
 | `src/tools.js`, `src/mcp.js`, `src/agent.js` | AI tools, MCP server, Claude assistant |
-| `src/integrations/` | plex, hue, huesensors, govee, wled, homeassistant, alexa, mqtt, roku, weather, frigate |
+| `src/plugins/` | one file per integration: its settings, triggers, conditions, steps, AI tools, API routes (see below) |
+| `src/integrations/`, `src/presence.js` | the device / service code the plugins use: plex, hue, huesensors, govee, wled, homeassistant, alexa, mqtt, roku, weather, frigate |
 | `public/` | UI (plain HTML/JS) |
 | `INTEGRATIONS.md` | research: smart-home platforms, top HA integrations, brands |
 | `ROADMAP.md` | what's next |
+
+## Adding an integration
+
+Each integration is one plugin file in `src/plugins/`, listed in `src/plugins/index.js` (the top of that file documents every
+field). The engine, AI tools, settings and API pick it up from there. A plugin can provide:
+- **config**: default settings, stored in the config file under its id;
+- **create / start / stop**: the service object (it can use earlier plugins' services, e.g. MQTT), plus `emits` for event sources;
+- **lights**: a light driver, so its lights work in groups, scenes and light steps;
+- **trigger**: a `source` with its `events`, a `match` function (or the generic filters), `validate` and `canHold` ("for N minutes");
+- **condition**: a key inside condition groups (`has` / `check`);
+- **steps**: new step types (`run`, `validate`);
+- **guide**: text for the AI's workflow guide, plus **tools** for MCP and the assistant;
+- **state**: what the UI needs, **routes** for its settings, and **keyed** machine endpoints such as webhooks.
+
+The UI (`public/app.js`) is still hand-written per integration: the trigger fields, step editor and Connections card.
 
 ## Run it all the time (Windows)
 

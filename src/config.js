@@ -1,6 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { randomId } from './util.js';
+import { pluginDefaults } from './plugins/index.js';
 
 const DATA_DIR = process.env.PLAYLITE_DATA ?? path.resolve('data');
 const CONFIG_PATH = path.join(DATA_DIR, 'config.json');
@@ -62,19 +63,10 @@ function seedRoutines() {
 function defaults() {
   return {
     webhookKey: randomId(12),
-    plex: { url: '', token: '', clientId: `playlite-${randomId(8)}`, pollSeconds: 10 },
-    hue: { bridgeIp: '', username: '' },
-    govee: { devices: {}, multicastInterface: '' },
-    wled: { devices: {} },
-    homeassistant: { url: '', token: '' },
-    alexa: { enabled: true, port: 80, ids: {}, hidden: [] },
     ai: { apiKey: '', model: '' },
     ntfy: { server: 'https://ntfy.sh', topic: '', token: '' },
-    mqtt: { url: '', username: '', password: '' },
     location: { lat: null, lon: null, name: '' },
-    weather: { enabled: true, units: 'f', alerts: true },
-    people: [],
-    frigate: { url: '', username: '', password: '', topicPrefix: 'frigate' },
+    ...pluginDefaults(), // each integration's settings (src/plugins/)
     mode: 'home',
     modes: ['home', 'away', 'movie', 'sleep', 'guest'],
     scenes: [],
@@ -94,8 +86,9 @@ export function loadConfig() {
     const stored = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     const base = defaults();
     current = { ...base, ...stored };
-    for (const key of ['plex', 'hue', 'govee', 'wled', 'homeassistant', 'alexa', 'ai', 'ntfy', 'mqtt', 'location', 'weather', 'frigate']) {
-      current[key] = { ...base[key], ...stored[key] };
+    // settings objects: keep saved values, add any new defaults (lists like "people" are kept as saved)
+    for (const [key, value] of Object.entries(base)) {
+      if (value && typeof value === 'object' && !Array.isArray(value)) current[key] = { ...value, ...stored[key] };
     }
   } else {
     current = defaults();

@@ -1,75 +1,40 @@
 // Rule engine: IF (trigger) [ONLY IF (conditions)] THEN (steps).
 //
 // A workflow fires when its trigger OR any of its orTriggers matches.
-// Trigger sources & their match fields:
-//   plex           event: player.online|media.play|media.pause|media.resume|media.stop|…  player, user, mediaTypes, skipContinued
+// Built-in trigger sources & their match fields (integrations add more — see src/plugins/):
 //   network        event: device.new|device.online|device.offline                      device (name/ip/mac/kind contains)
-//   homeassistant  event: state                                                          entity (id/name contains), to, from
 //   time           event: time.at (at "HH:MM", days [0-6]) | sun.sunrise | sun.sunset (offsetMin)   — fired by the scheduler
 //   webhook        event: <name>   (/hooks/<name>, Siri Shortcuts, IFTTT, Zapier, HA rest_command…)
 //   voice          event: alexa    device (exposed name contains)
 //   mode           event: mode.changed  to, from (house mode names)
-//   presence       event: person.arrives | person.leaves (person) | house.occupied (first one home) | house.empty (last one out)
-//   camera         event: object | object.end (Frigate)  camera, label (person, car… or a recognised name), zone, minScore
-//   weather        event: condition (to: clear|cloudy|fog|rain|snow|storm) | reading (reading, above|below) | alert | alert.ended (alert, severity)
-// Conditions: timeWindow {from,to} · dark · fullMoon · weather {condition | reading + above/below} · presence {person (or anyone/everyone/nobody) | device, state: home|away} · mode (name or list) · cooldownSec
-// Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click} · mode {mode}
-import { Token, contains, randomId, sleep } from './util.js';
+// Plugins without their own matcher use the same generic filters: player, user, mediaTypes, skipContinued, device, entity,
+// button, press, to, from.
+// Built-in conditions: timeWindow {from,to} · dark · light · fullMoon · mode (name or list) · cooldownSec (+ plugin conditions)
+// Built-in steps: set · pulse · wait · http {method,url,body,headers} · notify {message, title, topic, priority, tags, click, snapshot}
+//   · mode {mode} · capture / scene {scene} (+ plugin steps)
+import { Token, contains, randomId, sleep, template } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
-import { topicMatches } from './integrations/mqtt.js';
-import { conditionIs, readingMatches, severityAtLeast } from './integrations/weather.js';
+import { triggerPlugin, stepPlugin, conditionPlugins, snapshotPlugin } from './plugins/index.js';
 
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
 export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
 // "…and it stays that way for N minutes" — only for triggers that describe a state that can end.
-export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue', 'weather', 'presence'];
-export const canHold = (t) => HOLD_SOURCES.includes(t?.source) && !['device.new', 'media.scrobble', 'button', 'alert', 'alert.ended'].includes(t.event);
-// What an event is about: one HA entity, one network device, one Plex player (player vs media state), the house mode.
-export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? e.topic ?? e.reading ?? (e.type?.startsWith('person.') ? e.person : '') ?? ''}`;
-const hasWeather = (w) => Boolean(w && (w.condition || (w.reading && (num(w.above) || num(w.below)))));
-export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device || c.presence?.person || hasWeather(c.weather)));
+export const canHold = (t) => {
+  if (!t) return false;
+  if (t.source === 'network') return t.event !== 'device.new';
+  if (t.source === 'mode') return true;
+  return Boolean(triggerPlugin(t.source)?.trigger.canHold?.(t));
+};
+// What an event is about: one HA entity, one network device, one Plex player (player vs media state), the house mode…
+export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${triggerPlugin(e.source)?.trigger.subject?.(e) ?? e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? e.topic ?? ''}`;
+export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || conditionPlugins.some((p) => p.condition.has(c))));
 // Condition groups that actually check something: "conditions" OR any of "orConditions".
 export const conditionGroups = (routine) => [routine.conditions, ...(routine.orConditions ?? [])].filter(hasConditions);
 
-const num = (v) => v !== '' && v != null && Number.isFinite(Number(v));
-const sameValue = (a, b) => String(a !== null && typeof a === 'object' ? JSON.stringify(a) : a).trim().toLowerCase() === String(b).trim().toLowerCase();
-const pathOf = (obj, path) => String(path).split('.').reduce((o, k) => o?.[k], obj);
-
-// MQTT: topic (with + / # wildcards), then either the whole payload or one JSON field.
-// A field trigger fires when that field CHANGES (Zigbee2MQTT resends every field on each update);
-// ignoreChange is for "does this still hold?" checks during a "for N minutes" wait.
-function matchesMqtt(t, e, { ignoreChange = false } = {}) {
-  if (!topicMatches(t.topic, e.topic)) return false;
-  if (!t.field) return t.payload == null || t.payload === '' || sameValue(e.payload, t.payload);
-  const now = pathOf(e.json, t.field);
-  if (now === undefined) return false;
-  if (t.value != null && t.value !== '' && !sameValue(now, t.value)) return false;
-  if (!ignoreChange && e.prevJson !== undefined && sameValue(pathOf(e.prevJson, t.field), now)) return false;
-  return true;
-}
-
-// Weather: the sky turning to rain/snow/…, a reading crossing a level, or an NWS alert (name contains, minimum severity).
-function matchesWeather(t, e, { ignoreChange = false } = {}) {
-  if (e.type === 'condition') return !t.to || (conditionIs(e.to, t.to) && (ignoreChange || !conditionIs(e.from, t.to)));
-  if (e.type === 'reading') return (t.reading || 'temperature') === e.reading && readingMatches(t, e.value, e.prev, { crossing: !ignoreChange });
-  return (!t.alert || contains(e.alert, t.alert)) && severityAtLeast(e.severity, t.severity);
-}
-
-// Frigate detections. Without a zone filter only the first sighting counts (not every later zone it walks into).
-function matchesCamera(t, e) {
-  if (t.camera && !contains(e.camera, t.camera)) return false;
-  if (t.label && ![t.label].flat().some((l) => sameValue(e.label, l) || (e.subLabel && contains(e.subLabel, l)))) return false;
-  if (t.minScore && e.score < Number(t.minScore)) return false;
-  if (!t.zone) return e.type === 'object.end' || !e.zone;
-  return e.zone ? contains(e.zone, t.zone) : (e.zones ?? []).some((z) => contains(z, t.zone));
-}
-
 export function matchesTrigger(trigger, event, opts) {
   if (!trigger || trigger.source !== event.source || trigger.event !== event.type) return false;
-  if (trigger.source === 'mqtt') return matchesMqtt(trigger, event, opts);
-  if (trigger.source === 'weather') return matchesWeather(trigger, event, opts);
-  if (trigger.source === 'camera') return matchesCamera(trigger, event);
-  if (trigger.source === 'presence') return !trigger.person || !event.type.startsWith('person.') || contains(event.person, trigger.person);
+  const match = triggerPlugin(trigger.source)?.trigger.match;
+  if (match) return match(trigger, event, opts);
   if (trigger.player && !contains(event.player, trigger.player)) return false;
   if (trigger.user && !contains(event.user, trigger.user)) return false;
   if (trigger.mediaTypes?.length && event.mediaType && !trigger.mediaTypes.includes(event.mediaType)) return false;
@@ -96,13 +61,7 @@ export function withinTimeWindow(window, now = new Date()) {
   return from <= to ? cur >= from && cur < to : cur >= from || cur < to; // handles overnight windows
 }
 
-// "{{player}} started {{title}}" -> values from the triggering event.
-export function template(value, event) {
-  if (typeof value === 'string') return value.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, k) => String(k.split('.').reduce((o, p) => o?.[p], event) ?? ''));
-  if (Array.isArray(value)) return value.map((v) => template(v, event));
-  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, template(v, event)]));
-  return value;
-}
+export { template }; // lives in util.js so plugins can use it
 
 // ntfy publish request for a notify step. The step's topic overrides the default from Connections.
 export function ntfyRequest(step, settings = {}, event = {}) {
@@ -143,19 +102,14 @@ export class Engine {
   #modeChanges = []; // timestamps, to stop workflows flipping the mode back and forth forever
   #holds = new Map(); // routine|trigger|subject -> { timer, trigger, subject, name } for "for N minutes" triggers
 
-  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null, plex = null, roku = null, weather = null, cameras = null, presence = null }) {
+  // services: the plugins' service objects by plugin id (src/plugins/) — e.g. { mqtt, plex, weather, presence }
+  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, services = {} }) {
     this.getConfig = getConfig;
     this.updateConfig = updateConfig;
     this.lights = lights;
     this.log = log;
     this.discovery = discovery;
-    this.ha = ha;
-    this.mqtt = mqtt;
-    this.plex = plex;
-    this.roku = roku;
-    this.weather = weather;
-    this.cameras = cameras;
-    this.presence = presence;
+    this.services = services;
   }
 
   // House mode: one current mode (home, away, movie…). Changing it fires { source: 'mode', type: 'mode.changed', from, to }.
@@ -182,7 +136,14 @@ export class Engine {
   }
 
   handle(event) {
-    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.source === 'hue' && (event.to ?? `button ${event.button ?? ''} ${event.press}`), event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`, event.source === 'presence' && `${event.person} (${event.by})`, event.source === 'camera' && `${event.subLabel ? `${event.subLabel} (${event.label})` : event.label} on ${event.camera}${event.zone ? ` → ${event.zone}` : ''} ${event.score}%`, event.source === 'weather' && (event.type === 'reading' ? `${event.reading} ${event.value}` : event.type === 'condition' ? `${event.from} → ${event.to}` : `${event.alert}${event.headline ? ` — ${event.headline}` : ''}`)]
+    const desc = [
+      event.type,
+      event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,
+      event.player && `on "${event.player}"`,
+      event.device && `"${event.device}"`,
+      triggerPlugin(event.source)?.trigger.describe?.(event),
+      event.title && `(${event.title})`,
+    ]
       .filter(Boolean)
       .join(' ');
     // chatty sources (MQTT) can send many messages a second — log only the ones that start or end something
@@ -267,24 +228,10 @@ export class Engine {
     if (c.light && isDark(now, loc.lat, loc.lon)) return 'it is dark';
     if (c.fullMoon && !isFullMoon(now)) return 'not a full moon';
     if (c.mode?.length && ![c.mode].flat().includes(this.mode)) return `mode is ${this.mode}`;
-    if (hasWeather(c.weather)) {
-      const now = this.weather?.current;
-      if (!now) return 'no weather yet (set your location)';
-      const w = c.weather;
-      if (w.condition && ![w.condition].flat().some((x) => conditionIs(now.condition, x))) return `weather is ${now.condition}`;
-      if (w.reading && (num(w.above) || num(w.below)) && !readingMatches(w, now[w.reading], null, { crossing: false })) return `${w.reading} is ${now[w.reading]}`;
-    }
-    const who = c.presence?.person || c.presence?.device;
-    if (who) {
-      // a person (or anyone / everyone / nobody) first, else a network device by name
-      const why = this.presence?.check(who, c.presence.state ?? 'home');
-      if (why !== undefined) {
-        if (why) return why;
-      } else if (this.discovery) {
-        const home = this.discovery.find(who).some((d) => d.online);
-        if (c.presence.state === 'home' && !home) return `${who} is away`;
-        if (c.presence.state === 'away' && home) return `${who} is home`;
-      }
+    for (const p of conditionPlugins) {
+      if (!p.condition.has(c)) continue;
+      const why = p.condition.check(c, this.services[p.id], this);
+      if (why) return why;
     }
     return null;
   }
@@ -315,12 +262,9 @@ export class Engine {
         if (runToken.cancelled) break;
         if (step.type === 'wait') await sleep(step.ms ?? 0, runToken);
         else if (step.type === 'http') await this.#http(step, event);
-        else if (step.type === 'ha') await this.#ha(step, event);
         else if (step.type === 'notify') await this.#notify(step, event);
         else if (step.type === 'mode') this.#modeStep(step, routine);
-        else if (step.type === 'mqtt') this.#mqttStep(step, event);
-        else if (step.type === 'plex') await this.#plexStep(step, event);
-        else if (step.type === 'roku') await this.#rokuStep(step, event);
+        else if (stepPlugin(step.type)) await this.#pluginStep(step, event);
         else if (step.type === 'capture') await this.saveScene(step.scene, stepTargets(step)).then(({ scene }) => this.log.info(`📸 Saved scene "${scene.name}"`), (err) => this.log.error(`Save scene: ${err.message}`));
         else if (step.type === 'scene') {
           const scene = this.findScene(step.scene);
@@ -431,8 +375,9 @@ export class Engine {
     if (step.snapshot != null && step.snapshot !== false) {
       // a camera picture rides along as an attachment; if it can't be fetched the alert still goes out
       try {
-        if (!this.cameras) throw new Error('cameras are not set up');
-        const image = await this.cameras.snapshot(typeof step.snapshot === 'string' ? template(step.snapshot, event) : step.snapshot, event);
+        const cams = snapshotPlugin && this.services[snapshotPlugin.id];
+        if (!cams) throw new Error('cameras are not set up');
+        const image = await snapshotPlugin.snapshot(cams, typeof step.snapshot === 'string' ? template(step.snapshot, event) : step.snapshot, event);
         ({ url, init } = ntfyAttachment(url, init, image));
         attached = true;
       } catch (err) {
@@ -454,6 +399,17 @@ export class Engine {
     }
   }
 
+  // A step provided by a plugin (plex, roku, mqtt, ha…). Plugins throw; the error goes to the activity log.
+  async #pluginStep(step, event) {
+    const p = stepPlugin(step.type);
+    const def = p.steps[step.type];
+    try {
+      await def.run(step, event, { service: this.services[p.id], engine: this, log: this.log });
+    } catch (err) {
+      this.log.error(`${def.label?.(step) ?? p.name}: ${err.message}`);
+    }
+  }
+
   #modeStep(step, routine) {
     try {
       if (this.setMode(step.mode, routine.name, { byWorkflow: true })) this.log.info(`Mode → ${step.mode}`);
@@ -462,49 +418,4 @@ export class Engine {
     }
   }
 
-  async #plexStep(step, event) {
-    try {
-      if (!this.plex) throw new Error('Plex is not set up');
-      const player = template(step.player ?? '', event).trim();
-      // no player named: the Plex player that triggered this workflow, else whatever is playing
-      const target = player ? { player } : event.source === 'plex' ? { playerId: event.playerId, player: event.player } : {};
-      const { player: name } = await this.plex.control(step.action ?? 'pause', target);
-      this.log.info(`Plex: ${step.action} on ${name}`);
-    } catch (err) {
-      this.log.error(`Plex ${step.action}: ${err.message}`);
-    }
-  }
-
-  async #rokuStep(step, event) {
-    const device = template(step.device ?? '', event);
-    try {
-      if (!this.roku) throw new Error('Roku control is not available');
-      if (step.app) await this.roku.launch(device, step.app);
-      else await this.roku.keypress(device, step.key ?? 'Play');
-      this.log.info(`Roku${device ? ` ${device}` : ''}: ${step.app ? `open ${step.app}` : step.key}`);
-    } catch (err) {
-      this.log.error(`Roku: ${err.message}`);
-    }
-  }
-
-  #mqttStep(step, event) {
-    const topic = template(step.topic, event);
-    try {
-      if (!this.mqtt) throw new Error('MQTT is not set up');
-      this.mqtt.publish(topic, template(step.payload ?? '', event), { retain: Boolean(step.retain) });
-      this.log.info(`MQTT → ${topic}`);
-    } catch (err) {
-      this.log.error(`MQTT ${topic}: ${err.message}`);
-    }
-  }
-
-  async #ha(step, event) {
-    try {
-      if (!this.ha) throw new Error('Home Assistant is not set up');
-      await this.ha.callService(step.service, template(step.data ?? {}, event));
-      this.log.info(`Home Assistant: ${step.service}`);
-    } catch (err) {
-      this.log.error(`Home Assistant ${step.service}: ${err.message}`);
-    }
-  }
 }

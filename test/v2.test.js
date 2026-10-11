@@ -21,6 +21,8 @@ import { Roku } from '../src/integrations/roku.js';
 import { Weather, conditionOf, conditionIs, readingMatches } from '../src/integrations/weather.js';
 import { Frigate } from '../src/integrations/frigate.js';
 import { Presence, distanceM } from '../src/presence.js';
+import { PLUGINS, pluginDefaults, pluginStepTypes } from '../src/plugins/index.js';
+import { WORKFLOW_GUIDE } from '../src/tools.js';
 import { EventEmitter } from 'node:events';
 import http from 'node:http';
 
@@ -63,7 +65,7 @@ function fakeCtx() {
   const lights = { list: async () => [{ id: 'hue:light:1', name: 'Lamp', kind: 'hue-light' }], resolve: (t) => t ?? [], claim: () => new Map(), release() {} };
   const discovery = { list: () => [{ name: 'DMF-iPhone', ip: '192.168.1.223', online: true, label: 'iPhone' }], find: (q) => [{ name: 'DMF-iPhone', online: q.includes('iPhone') }] };
   const engine = new Engine({ getConfig: () => config, lights, log, discovery });
-  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights, discovery, ha: null, log });
+  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights, discovery, log });
   return { config, tools, engine, discovery };
 }
 
@@ -372,7 +374,7 @@ test('scenes: save, restore in a workflow, capture step, colors, MCP', async () 
   await assert.rejects(engine.applyScene('nope'), /No scene/);
   assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'x', event: 'y' }, steps: [{ type: 'scene' }] }), /scene step needs a scene name/);
 
-  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights, discovery: null, ha: null, log });
+  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights, discovery: null, log });
   const call = (name, a) => tools.find((t) => t.name === name).run(a);
   assert.deepEqual((await call('list_scenes', {})).map((x) => [x.name, x.lights]), [['Evening', 3], ['Before movie', 3]]);
   bulbs[1].brightness = 5;
@@ -416,7 +418,7 @@ test('mqtt: client auth, events, retained skipped, QoS1 ack, publish, triggers',
   assert.equal(events.length, 0, 'retained message must not fire workflows');
   assert.equal(mqtt.topics.get('zigbee2mqtt/Hall').json.battery, 90);
 
-  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, mqtt });
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, services: { mqtt } });
   mqtt.on('event', (e) => engine.handle(e));
   const fired = [];
   const realRun = engine.run.bind(engine);
@@ -453,7 +455,7 @@ test('mqtt: client auth, events, retained skipped, QoS1 ack, publish, triggers',
   assert.throws(() => mqtt.publish('a/#', 'x'), /wildcards/);
   assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'mqtt', event: 'message' }, steps: [{ type: 'wait' }] }), /needs a topic/);
   assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'webhook', event: 'x' }, steps: [{ type: 'mqtt', topic: 'a/+' }] }), /plain topic/);
-  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights: null, discovery: null, ha: null, mqtt, log });
+  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights: null, discovery: null, services: { mqtt }, log });
   assert.ok((await tools.find((t) => t.name === 'mqtt_topics').run({ query: 'plug' })).some((t) => t.topic === 'stat/plug/POWER'));
 });
 
@@ -644,7 +646,7 @@ test('plex control: picks the player, relays via the server, falls back to the p
   const errors = [];
   sent.length = 0;
   relayWorks = true;
-  const engine = new Engine({ getConfig: () => ({ routines: [], groups: [] }), lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, plex, roku });
+  const engine = new Engine({ getConfig: () => ({ routines: [], groups: [] }), lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, services: { plex, roku } });
   await engine.run({ id: 'x', name: 'Doorbell', steps: [{ type: 'plex', action: 'pause' }, { type: 'roku', key: 'Play' }] }, { source: 'plex', type: 'media.play', playerId: 'b', player: 'B' });
   assert.deepEqual(sent, ['relay /player/playback/pause b music']);
   assert.match(errors.join(), /Roku: the Roku refused/);
@@ -678,7 +680,7 @@ test('weather: conditions, crossings, alerts (new / update / ended / outside US)
   const config = { routines: [], location: { lat: 36.16218, lon: -86.77437 }, weather: { units: 'f' } };
   const log = { info() {}, warn() {}, error() {}, event() {} };
   const weather = Object.assign(new Weather(() => config, log), { weatherUrl: base, alertsUrl: base });
-  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, weather });
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, services: { weather } });
   const fired = [];
   engine.fire = (r, e) => fired.push(`${r.id}:${e.type}${e.alert ? ` ${e.alert}` : ''}`);
   weather.on('event', (e) => engine.handle(e));
@@ -785,7 +787,7 @@ test('cameras: Frigate login, cameras, detections → triggers, snapshot in a ph
   assert.deepEqual(frigate.cameras, [{ name: 'front_door', zones: ['porch', 'walkway'] }, { name: 'driveway', zones: [] }]);
   assert.equal(hits.filter((h) => h === '/api/login').length, 1); // logged in once, cookie reused
 
-  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, cameras: frigate });
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, services: { frigate } });
   const fired = [];
   const realFire = engine.fire.bind(engine);
   engine.fire = (r, e) => {
@@ -832,7 +834,7 @@ test('cameras: Frigate login, cameras, detections → triggers, snapshot in a ph
   assert.match(log.warns.at(-1), /no snapshot .*HTTP 404/);
 
   // the AI can look at a camera
-  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights: {}, frigate, log });
+  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights: {}, services: { frigate }, log });
   const out = await handleMcp({ jsonrpc: '2.0', id: 3, method: 'tools/call', params: { name: 'camera_snapshot', arguments: { camera: 'driveway' } } }, tools);
   assert.equal(out.result.content[0].type, 'image');
   assert.equal(out.result.content[0].mimeType, 'image/jpeg');
@@ -844,7 +846,7 @@ test('cameras: Frigate login, cameras, detections → triggers, snapshot in a ph
 
   // validation
   const w = { name: 'c', steps };
-  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'camera', event: 'motion' } }), /object or object.end/);
+  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'camera', event: 'motion' } }), /one of: object, object.end/);
   assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'camera', event: 'object', minScore: 150 } }), /0-100/);
   assert.equal(normalizeWorkflow({ ...w, trigger: { source: 'webhook', event: 'doorbell' }, steps: [{ type: 'notify', message: 'Ding', snapshot: true }] }).steps[0].snapshot, '');
 });
@@ -867,7 +869,7 @@ test('presence: Wi-Fi, OwnTracks, Home Assistant, Shortcuts → arrives / leaves
   };
   const log = { info() {}, warn() {}, error() {}, event() {} };
   const presence = new Presence({ getConfig: () => config, updateConfig: (fn) => fn(config), discovery, mqtt, ha, log });
-  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, discovery, presence });
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, discovery, services: { presence } });
   const fired = [];
   engine.fire = (r, e) => fired.push(`${r.id}:${e.person ?? ''}`);
   presence.on('event', (e) => engine.handle(e));
@@ -944,4 +946,31 @@ test('presence: Wi-Fi, OwnTracks, Home Assistant, Shortcuts → arrives / leaves
   const w = { name: 'p', steps };
   assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'presence', event: 'arrive' } }), /person.arrives/);
   assert.equal(normalizeWorkflow({ ...w, trigger: { source: 'presence', event: 'house.empty', forMin: 15 } }).trigger.forMin, 15);
+});
+
+test('plugins: well-formed, unique, and wired into the guide, steps and tools', () => {
+  const ids = PLUGINS.map((p) => p.id);
+  assert.equal(new Set(ids).size, ids.length);
+  const sources = PLUGINS.filter((p) => p.trigger).map((p) => p.trigger.source);
+  assert.equal(new Set(sources).size, sources.length);
+  for (const s of ['network', 'time', 'webhook', 'voice', 'mode']) assert.ok(!sources.includes(s), `${s} is a built-in source`);
+  for (const p of PLUGINS) {
+    if (p.trigger) assert.ok(p.trigger.events?.length, `${p.id}: trigger needs its events`);
+    for (const [type, def] of Object.entries(p.steps ?? {})) assert.equal(typeof def.run, 'function', `${p.id}: step ${type} needs run()`);
+    if (p.condition) assert.ok(typeof p.condition.has === 'function' && typeof p.condition.check === 'function', `${p.id}: condition needs has/check`);
+    if (p.guide?.triggers) assert.ok(WORKFLOW_GUIDE.includes(p.guide.triggers), `${p.id}: trigger guide missing`);
+    if (p.guide?.steps) assert.ok(WORKFLOW_GUIDE.includes(p.guide.steps), `${p.id}: step guide missing`);
+  }
+  assert.equal(new Set(pluginStepTypes).size, pluginStepTypes.length);
+  for (const t of ['set', 'pulse', 'wait', 'http', 'notify', 'mode', 'scene', 'capture']) assert.ok(!pluginStepTypes.includes(t), `${t} is a built-in step`);
+  // defaults are fresh copies each time (no shared objects between config loads)
+  const a = pluginDefaults();
+  a.mqtt.url = 'changed';
+  assert.equal(pluginDefaults().mqtt.url, '');
+  assert.deepEqual(pluginDefaults().people, []);
+  // every plugin tool shows up, even with no services (they explain they're not set up)
+  const tools = createTools({ getConfig: () => ({ routines: [], groups: [] }), updateConfig() {}, engine: {}, lights: {}, discovery: null, log: { entries: [] } });
+  const names = tools.map((t) => t.name);
+  assert.equal(new Set(names).size, names.length);
+  for (const n of ['plex_control', 'roku', 'mqtt_publish', 'get_weather', 'camera_snapshot', 'list_people', 'home_assistant_call', 'list_hue_sensors']) assert.ok(names.includes(n), n);
 });

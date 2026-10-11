@@ -1,9 +1,11 @@
 // Tools that AI agents can use — shared by the MCP server (/mcp) and the built-in Claude assistant.
+// Integration-specific tools, guide text and validation come from the plugins (src/plugins/).
 import { randomId } from './util.js';
 import { hasConditions, canHold } from './engine.js';
-import { PLEX_ACTIONS } from './integrations/plex.js';
-import { ROKU_KEYS } from './integrations/roku.js';
-import { CONDITIONS, READINGS, SEVERITIES } from './integrations/weather.js';
+import { PLUGINS, triggerPlugin, stepPlugin, pluginStepTypes, conditionPlugins } from './plugins/index.js';
+
+const guideFor = (part) => PLUGINS.map((p) => p.guide?.[part]).filter(Boolean).join('\n');
+const holdable = ['network', 'mode', ...PLUGINS.filter((p) => p.trigger?.canHold).map((p) => p.trigger.source)];
 
 export const WORKFLOW_GUIDE = `A Playlite workflow is JSON:
 {
@@ -19,45 +21,18 @@ export const WORKFLOW_GUIDE = `A Playlite workflow is JSON:
   "steps": [ ... ]
 }
 TRIGGERS (source → event → optional filters):
-- plex → player.online | player.offline | media.play | media.pause | media.resume | media.stop | media.scrobble.
-  Filters: player (device name contains), user, mediaTypes ["movie","episode","clip","track"], skipContinued (ignore next-episode autoplay).
 - network → device.new (never-seen device joined) | device.online | device.offline. Filter: device (name/ip/mac/kind contains, e.g. "iPhone").
-- homeassistant → state. Filters: entity (entity_id or name contains), to (new state, e.g. "on", "open", "home"), from.
 - time → time.at (with "at": "HH:MM", optional "days": [0-6], 0=Sunday) | sun.sunrise | sun.sunset (optional "offsetMin", negative = before).
 - webhook → any name, fired by GET/POST /hooks/<name>?key=… (Siri Shortcuts, IFTTT, Zapier, Home Assistant).
 - voice → alexa. Filter: device (spoken device name).
 - mode → mode.changed (the house mode was switched). Filters: to, from (mode names, see get_mode).
-- hue → motion (filter "to": "detected"|"clear") | contact (Hue door/window sensor, "to": "open"|"closed") |
-  button (Hue dimmer/smart button/tap switch; "button": 1-4, "press": "short_release"|"long_press"|"repeat"|"long_release"|"initial_press").
-  Filter "device" = sensor name contains. No motion for 10 min: {"source":"hue","event":"motion","device":"Hall","to":"clear","forMin":10}.
-- mqtt → message. "topic" (MQTT wildcards + and # allowed, see mqtt_topics) and EITHER "payload" (whole message equals, e.g. "ON")
-  OR "field" (JSON key, dots for nesting) with optional "value" — a field trigger fires when that field CHANGES (to "value").
-  Zigbee2MQTT motion: {"source":"mqtt","event":"message","topic":"zigbee2mqtt/Hall motion","field":"occupancy","value":"true"}
-  No motion for 10 min: same with "value":"false","forMin":10. Templates: {{topic}}, {{payload}}, {{json.temperature}}.
-- presence (people, see list_people — tracked by phone on Wi-Fi, OwnTracks GPS, Home Assistant or Shortcuts) →
-  person.arrives | person.leaves (filter "person": name; leave it out for anyone) | house.occupied (first person home) |
-  house.empty (last person left). Everyone gone → away mode: {"source":"presence","event":"house.empty"} + step {"type":"mode","mode":"away"}.
-  Prefer these over network device.online/offline for people. Templates: {{person}}, {{by}}.
-  Conditions are checked AFTER the change, so "only if nobody was home" is house.occupied, not a "nobody" condition.
-- camera (Frigate NVR, see list_cameras) → object (Frigate confirmed a person/car/dog/cat/package… — once per sighting, and again when it
-  walks into a new zone) | object.end (it left / the event ended). Filters: "camera" (name contains), "label" ("person", "car", or a name
-  Frigate recognised, e.g. a face), "zone" (only when it is in / enters that zone, e.g. "porch"), "minScore" (0-100 confidence).
-  Person at the front door after dark: trigger {"source":"camera","event":"object","camera":"front","label":"person","zone":"porch"},
-  conditions {"dark":true}. Templates: {{camera}}, {{label}}, {{subLabel}}, {{zone}}, {{score}}.
-- weather (uses the location from Connections; checked every 10 min) →
-  condition: the sky changes; "to": clear|cloudy|fog|rain|snow|storm (rain includes storms). Rain starts: {"source":"weather","event":"condition","to":"rain"}
-  reading: "reading": temperature|feelsLike|humidity|wind|gusts with "below" and/or "above" — fires when it CROSSES that level
-    (units from Connections, °F/mph by default). Frost: {"source":"weather","event":"reading","reading":"temperature","below":32}
-  alert | alert.ended: a US National Weather Service alert for this location starts/ends (checked every 2 min). Filters: "alert" (name contains,
-    e.g. "Tornado Warning", "Severe Thunderstorm"), "severity" (minimum: Minor|Moderate|Severe|Extreme).
-    Templates: {{alert}}, {{headline}}, {{severity}}, {{instruction}}, {{area}}. Tornado warning → lights red + urgent push:
-    trigger {"source":"weather","event":"alert","alert":"Tornado Warning"}, steps set color #ff0000 + notify priority 5 "{{headline}}".
-"forMin": N on a plex, network, homeassistant, mode, mqtt, presence, hue motion/contact or weather condition/reading trigger = only if it STAYS that way for N minutes
+${guideFor('triggers')}
+"forMin": N on a ${holdable.join(', ')} trigger that describes a state (not e.g. a button press or a new device) = only if it STAYS that way for N minutes
   (e.g. door open 10 min: {"source":"homeassistant","event":"state","entity":"front_door","to":"on","forMin":10};
   phone gone 30 min: {"source":"network","event":"device.offline","device":"iPhone","forMin":30}). Waits reset on restart.
 CONDITIONS: timeWindow {"from":"HH:MM","to":"HH:MM"} · dark: true (after sunset/before sunrise) · light: true · fullMoon: true ·
-  presence {"person": "Dustin" | "anyone" | "everyone" | "nobody", "state": "home"|"away"} (a network "device" name also works) · mode: "movie" or ["movie","sleep"] (current house mode is one of these) ·
-  weather {"condition": "rain"} (or a list) · weather {"reading": "temperature", "below": 40} (or "above") — the latest weather, see get_weather.
+  mode: "movie" or ["movie","sleep"] (current house mode is one of these) ·
+  ${PLUGINS.map((p) => p.guide?.conditions).filter(Boolean).join(' ·\n  ')}.
   Checks inside one group are AND. For OR use orConditions, e.g. "after dark OR in movie mode" →
   "conditions": {"dark": true}, "orConditions": [{"mode": "movie"}].
 STEPS:
@@ -65,36 +40,17 @@ STEPS:
 - {"type":"pulse","levels":[100,70,100],"times":5,"stepMs":1000,"restore":true}
 - {"type":"wait","ms":2000}
 - {"type":"http","method":"POST","url":"https://…","body":{…}}   (strings may use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} from the event)
-- {"type":"ha","service":"switch.turn_on","data":{"entity_id":"switch.fan"}}
 - {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy; optional "topic" overrides the default set under Connections; priority 1-5, 5 = urgent)
   Add "snapshot": "" to attach the picture from the camera that triggered the workflow, "snapshot": "driveway" for that Frigate camera's
   live frame, or "snapshot": "http://user:pass@192.168.1.50/snap.jpg" for any camera's snapshot URL. Doorbell press → snapshot of the porch.
 - {"type":"mode","mode":"movie"}   (switch the house mode; this can trigger other workflows)
-- {"type":"plex","action":"pause","player":"Living Room"}   (actions: pause, play, toggle, stop, next, previous, forward, back;
-  leave "player" out to control the Plex player that triggered the workflow, or else the one that's playing. E.g. doorbell → pause the movie)
-- {"type":"roku","device":"Bedroom Roku","key":"Play"} or {"type":"roku","device":"…","app":"plex"}   (Roku remote buttons: Play (= play/pause), Home,
-  Back, Select, Rev, Fwd, InstantReplay, VolumeUp, VolumeDown, VolumeMute, PowerOff, PowerOn; apps: plex, netflix, youtube, disney+, hulu, prime video, max, spotify)
-- {"type":"mqtt","topic":"zigbee2mqtt/Lamp/set","payload":{"state":"ON"},"retain":false}   (publish; payload may be text or JSON, {{variables}} work)
+${guideFor('steps')}
 - {"type":"capture","scene":"Before movie","targets":[optional override]}   (save how the lights look right now as a scene; same name = replace)
 - {"type":"scene","scene":"Before movie","transitionMs":3000}   (put the lights back the way that scene saved them; see list_scenes)
 SCENES remember brightness + white temperature or color per light. "Remember how the room was and restore it after the movie" =
   movie-start workflow: capture "Before movie" FIRST, then dim; movie-stop workflow: scene "Before movie".`;
 
-const isNum = (v) => v !== '' && v != null && Number.isFinite(Number(v));
-function checkWeatherTrigger(t) {
-  if (!['condition', 'reading', 'alert', 'alert.ended'].includes(t.event)) throw new Error('weather trigger event must be condition, reading, alert or alert.ended');
-  if (t.event === 'condition' && t.to && !CONDITIONS.includes(t.to)) throw new Error(`weather "to" must be one of: ${CONDITIONS.join(', ')}`);
-  if (t.event === 'reading') {
-    t.reading ||= 'temperature';
-    if (!READINGS.includes(t.reading)) throw new Error(`weather reading must be one of: ${READINGS.join(', ')}`);
-    for (const k of ['above', 'below']) {
-      if (isNum(t[k])) t[k] = Number(t[k]);
-      else delete t[k];
-    }
-    if (t.above == null && t.below == null) throw new Error('weather reading trigger needs "below" or "above"');
-  }
-  if (t.severity && !SEVERITIES.includes(t.severity)) throw new Error(`alert severity must be one of: ${SEVERITIES.join(', ')}`);
-}
+const CORE_STEPS = ['set', 'pulse', 'wait', 'http', 'notify', 'mode', 'scene', 'capture'];
 
 export function normalizeWorkflow(w) {
   if (!w || typeof w !== 'object') throw new Error('Workflow must be an object');
@@ -103,28 +59,21 @@ export function normalizeWorkflow(w) {
   if (w.orTriggers != null && !Array.isArray(w.orTriggers)) throw new Error('orTriggers must be a list of triggers');
   if (w.orTriggers?.some((t) => !t?.source || !t?.event)) throw new Error('Every extra trigger needs a source and an event');
   if (w.orTriggers && !w.orTriggers.length) delete w.orTriggers;
-  if ([w.trigger, ...(w.orTriggers ?? [])].some((t) => t.source === 'mqtt' && !String(t.topic ?? '').trim())) throw new Error('MQTT trigger needs a topic');
   for (const t of [w.trigger, ...(w.orTriggers ?? [])]) {
-    if (t.source === 'hue' && t.event === 'button') t.press ||= 'short_release'; // one press = one run
-    if (t.source === 'weather') checkWeatherTrigger(t);
-    if (t.source === 'presence' && !['person.arrives', 'person.leaves', 'house.occupied', 'house.empty'].includes(t.event)) throw new Error('presence trigger event must be person.arrives, person.leaves, house.occupied or house.empty');
-    if (t.source === 'camera') {
-      if (!['object', 'object.end'].includes(t.event)) throw new Error('camera trigger event must be object or object.end');
-      if (t.minScore != null && t.minScore !== '' && !(Number(t.minScore) >= 0 && Number(t.minScore) <= 100)) throw new Error('minScore must be 0-100');
-    }
+    const tp = triggerPlugin(t.source)?.trigger;
+    if (tp?.events && !tp.events.includes(t.event)) throw new Error(`${t.source} trigger event must be one of: ${tp.events.join(', ')}`);
+    tp?.validate?.(t);
     if (t.forMin == null || t.forMin === '' || t.forMin === 0) {
       delete t.forMin;
       continue;
     }
     if (!(Number(t.forMin) > 0)) throw new Error('forMin must be a positive number of minutes');
-    if (!canHold(t)) throw new Error(`"for N minutes" only works with triggers describing a state that can end — Plex, network, Home Assistant, house mode, MQTT, Hue motion/contact, weather (not ${t.source} ${t.event})`);
+    if (!canHold(t)) throw new Error(`"for N minutes" only works with triggers describing a state that can end — ${holdable.join(', ')} (not ${t.source} ${t.event})`);
     t.forMin = Number(t.forMin);
   }
   if (w.orConditions != null && !Array.isArray(w.orConditions)) throw new Error('orConditions must be a list of condition groups');
   for (const c of [w.conditions, ...(w.orConditions ?? [])]) {
-    const cw = c?.weather;
-    if (cw?.condition && ![cw.condition].flat().every((x) => CONDITIONS.includes(x))) throw new Error(`weather condition must be one of: ${CONDITIONS.join(', ')}`);
-    if (cw?.reading && !READINGS.includes(cw.reading)) throw new Error(`weather reading must be one of: ${READINGS.join(', ')}`);
+    if (c) for (const p of conditionPlugins) p.condition.validate?.(c);
   }
   if (w.orConditions) {
     w.orConditions = w.orConditions.filter(hasConditions);
@@ -132,18 +81,15 @@ export function normalizeWorkflow(w) {
   }
   if (!Array.isArray(w.steps) || !w.steps.length) throw new Error('Workflow needs at least one step');
   for (const s of w.steps) {
-    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode', 'scene', 'capture', 'mqtt', 'plex', 'roku'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
+    if (![...CORE_STEPS, ...pluginStepTypes].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
+    stepPlugin(s.type)?.steps[s.type].validate?.(s);
     if (s.type === 'pulse') {
       s.levels ??= [100, 70, 100];
       s.times ??= 3;
       s.stepMs ??= 1000;
     }
     if (s.type === 'http' && !/^https?:\/\//.test(s.url ?? '')) throw new Error('http step needs a full http(s) URL');
-    if (s.type === 'ha' && !/^\w+\.\w+$/.test(s.service ?? '')) throw new Error('ha step needs a service like "light.turn_on"');
     if (s.type === 'mode' && !String(s.mode ?? '').trim()) throw new Error('mode step needs a mode, e.g. "movie"');
-    if (s.type === 'plex' && !['toggle', ...Object.keys(PLEX_ACTIONS)].includes(s.action)) throw new Error(`plex step action must be one of: toggle, ${Object.keys(PLEX_ACTIONS).join(', ')}`);
-    if (s.type === 'roku' && !s.app && !ROKU_KEYS.some(([k]) => k === s.key)) throw new Error(`roku step needs "key" (${ROKU_KEYS.map(([k]) => k).join(', ')}) or "app"`);
-    if (s.type === 'mqtt' && (!String(s.topic ?? '').trim() || /[+#]/.test(s.topic))) throw new Error('mqtt step needs a plain topic (no + or # wildcards)');
     if ((s.type === 'scene' || s.type === 'capture') && !String(s.scene ?? '').trim()) throw new Error(`${s.type} step needs a scene name`);
     if (s.type === 'notify') {
       if (!String(s.message ?? '').trim()) throw new Error('notify step needs a message');
@@ -156,7 +102,8 @@ export function normalizeWorkflow(w) {
 }
 
 export function createTools(ctx) {
-  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, weather, frigate, presence, log } = ctx;
+  // ctx.services: the plugins' services by id (missing ones are fine — their tools say they're not set up)
+  const { getConfig, updateConfig, engine, lights, discovery, services = {}, log } = ctx;
   const findRoutine = (q) => {
     const rs = getConfig().routines;
     const s = String(q ?? '').toLowerCase();
@@ -290,98 +237,6 @@ export function createTools(ctx) {
       run: async (a) => ({ ok: true, scene: (await engine.applyScene(a.scene, a.transitionMs ?? 0)).name }),
     },
     {
-      name: 'list_people',
-      description: 'Who is home: each person with home/away, since when and what said so (Wi-Fi, OwnTracks, Home Assistant, Shortcut, manual).',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      run: async () => (presence?.summary() ?? []).map(({ name, state, since, by, devices, owntracks, ha }) => ({ name, state, since, by, trackedBy: [devices?.length && 'Wi-Fi', owntracks && 'OwnTracks', ha && 'Home Assistant'].filter(Boolean) })),
-    },
-    {
-      name: 'set_presence',
-      description: 'Mark a person home or away by hand (e.g. "I\'m leaving", "Sam is home"). Runs any arrives/leaves workflows.',
-      inputSchema: { type: 'object', properties: { person: { type: 'string' }, state: { type: 'string', enum: ['home', 'away'] } }, required: ['person', 'state'], additionalProperties: false },
-      run: async (a) => {
-        if (!presence) throw new Error('Presence is not available');
-        return { ok: true, changed: presence.set(a.person, a.state, 'AI') };
-      },
-    },
-    {
-      name: 'list_cameras',
-      description: 'Frigate cameras with their zones (for camera triggers and snapshots) and the most recent detections (who/what was seen where).',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      run: async () => {
-        if (!frigate || !getConfig().frigate?.url) throw new Error('Frigate is not set up — add it under Connections → Cameras');
-        return { status: frigate.status, cameras: frigate.cameras, recent: frigate.recent };
-      },
-    },
-    {
-      name: 'camera_snapshot',
-      description: 'Look at a Frigate camera right now: returns its current picture (to check the driveway, the garage door, a package on the porch…).',
-      inputSchema: { type: 'object', properties: { camera: { type: 'string', description: 'camera name from list_cameras' } }, required: ['camera'], additionalProperties: false },
-      run: async (a) => {
-        if (!frigate) throw new Error('Frigate is not set up');
-        const shot = await frigate.snapshot(a.camera);
-        return { camera: a.camera, at: new Date().toISOString(), image: { data: shot.data.toString('base64'), mimeType: 'image/jpeg' } };
-      },
-    },
-    {
-      name: 'get_weather',
-      description: 'Current weather at the home location (temperature, feels like, humidity, wind, condition, today\'s high/low) and any active US National Weather Service alerts.',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      run: async () => {
-        if (!weather) throw new Error('Weather is not available');
-        if (!weather.current && !weather.status.lastError) await weather.pollWeather().catch(() => {});
-        return weather.summary();
-      },
-    },
-    {
-      name: 'plex_control',
-      description: 'Control Plex playback on a player: pause, play, toggle, stop, next, previous, forward (~30 s), back (~10 s). Leave player out to control whatever is playing.',
-      inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['toggle', ...Object.keys(PLEX_ACTIONS)] }, player: { type: 'string' } }, required: ['action'], additionalProperties: false },
-      run: async (a) => {
-        if (!plex) throw new Error('Plex is not set up');
-        return { ok: true, ...(await plex.control(a.action, a.player ? { player: a.player } : {})) };
-      },
-    },
-    {
-      name: 'roku',
-      description: 'Press a Roku remote button (key) or open a channel (app) on a Roku found on the network. Omit device if there is only one Roku.',
-      inputSchema: { type: 'object', properties: { device: { type: 'string' }, key: { type: 'string', enum: ROKU_KEYS.map(([k]) => k) }, app: { type: 'string' } }, additionalProperties: false },
-      run: async (a) => {
-        if (!roku) throw new Error('Roku control is not available');
-        if (a.app) await roku.launch(a.device, a.app);
-        else await roku.keypress(a.device, a.key ?? 'Play');
-        return { ok: true, devices: roku.devices().map((d) => d.name) };
-      },
-    },
-    {
-      name: 'list_hue_sensors',
-      description: 'Hue motion sensors, dimmers/buttons and contact sensors paired to the Hue bridge (names to use in "hue" triggers).',
-      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      run: async () => {
-        if (!hueSensors?.status.connected) throw new Error(`Hue sensors are not connected${hueSensors?.status.lastError ? `: ${hueSensors.status.lastError}` : ''}`);
-        return hueSensors.sensors();
-      },
-    },
-    {
-      name: 'mqtt_topics',
-      description: 'MQTT topics seen recently on the broker, newest first, with their last message (use to find Zigbee2MQTT / Tasmota / Frigate topics and JSON fields). Optional text filter.',
-      inputSchema: { type: 'object', properties: { query: { type: 'string' } }, additionalProperties: false },
-      run: async (a) => {
-        if (!mqtt?.status.connected) throw new Error('MQTT is not connected — set it up under Connections → MQTT');
-        return mqtt.recent(a.query ?? '').slice(0, 60);
-      },
-    },
-    {
-      name: 'mqtt_publish',
-      description: 'Publish an MQTT message, e.g. topic "zigbee2mqtt/Lamp/set" payload {"state":"TOGGLE"}, or "cmnd/plug/POWER" payload "ON".',
-      inputSchema: { type: 'object', properties: { topic: { type: 'string' }, payload: {}, retain: { type: 'boolean' } }, required: ['topic'], additionalProperties: false },
-      run: async (a) => {
-        if (!mqtt) throw new Error('MQTT is not set up');
-        mqtt.publish(a.topic, a.payload, { retain: a.retain });
-        return { ok: true };
-      },
-    },
-    {
       name: 'list_network_devices',
       description: 'Devices Playlite has discovered on the home network (phones, TVs, cameras, speakers, hubs…) and whether they are online now. Optional text filter.',
       inputSchema: { type: 'object', properties: { query: { type: 'string' } }, additionalProperties: false },
@@ -396,21 +251,6 @@ export function createTools(ctx) {
       run: async (a) => log.entries.slice(-(a.limit ?? 30)).map((e) => `${e.at.slice(11, 19)} ${e.level}: ${e.message}`),
     },
     {
-      name: 'home_assistant_entities',
-      description: 'Search Home Assistant entities (needs the Home Assistant connection). Optional domain like "light", "switch", "sensor", "climate", "lock", "person".',
-      inputSchema: { type: 'object', properties: { query: { type: 'string' }, domain: { type: 'string' } }, additionalProperties: false },
-      run: async (a) => (ha?.status.connected ? ha.entities(a.query ?? '', a.domain ?? '').slice(0, 100) : { error: 'Home Assistant is not connected' }),
-    },
-    {
-      name: 'home_assistant_call',
-      description: 'Call any Home Assistant service, e.g. service "climate.set_temperature" with data {"entity_id":"climate.house","temperature":70}.',
-      inputSchema: { type: 'object', properties: { service: { type: 'string' }, data: { type: 'object' } }, required: ['service'], additionalProperties: false },
-      run: async (a) => {
-        await ha.callService(a.service, a.data ?? {});
-        return { ok: true };
-      },
-    },
-    {
       name: 'simulate_event',
       description: 'Pretend an event happened (to test workflows), e.g. {"source":"plex","type":"media.pause","player":"Living Room TV","mediaType":"movie"}.',
       inputSchema: { type: 'object', properties: { event: { type: 'object' } }, required: ['event'], additionalProperties: false },
@@ -419,6 +259,7 @@ export function createTools(ctx) {
         return { ok: true };
       },
     },
+    ...PLUGINS.flatMap((p) => p.tools?.(services[p.id], ctx) ?? []),
   ];
   return tools;
 }
