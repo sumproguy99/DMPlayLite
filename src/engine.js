@@ -8,7 +8,7 @@
 //   webhook        event: <name>   (/hooks/<name>, Siri Shortcuts, IFTTT, Zapier, HA rest_command…)
 //   voice          event: alexa    device (exposed name contains)
 // Conditions: timeWindow {from,to} · dark · fullMoon · presence {device, state: home|away} · cooldownSec
-// Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data}
+// Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click}
 import { Token, contains, sleep } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
 
@@ -44,6 +44,25 @@ export function template(value, event) {
   if (Array.isArray(value)) return value.map((v) => template(v, event));
   if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, template(v, event)]));
   return value;
+}
+
+// ntfy publish request for a notify step. The step's topic overrides the default from Connections.
+export function ntfyRequest(step, settings = {}, event = {}) {
+  const topic = String(template(step.topic || settings.topic || '', event)).trim();
+  if (!topic) throw new Error('no ntfy topic — set one under Connections → Phone alerts');
+  const tags = template(step.tags ?? '', event);
+  const body = {
+    topic,
+    message: template(step.message || 'Playlite', event),
+    ...(step.title ? { title: template(step.title, event) } : {}),
+    ...(step.priority ? { priority: Number(step.priority) } : {}),
+    ...(tags ? { tags: (Array.isArray(tags) ? tags : String(tags).split(',')).map((t) => t.trim()).filter(Boolean) } : {}),
+    ...(step.click ? { click: template(step.click, event) } : {}),
+  };
+  const headers = { 'Content-Type': 'application/json' };
+  if (settings.token) headers.Authorization = `Bearer ${settings.token}`;
+  const server = (settings.server || 'https://ntfy.sh').replace(/\/+$/, '');
+  return { url: server, init: { method: 'POST', headers, body: JSON.stringify(body) } };
 }
 
 const LIGHT_STEPS = new Set(['set', 'pulse']);
@@ -127,6 +146,7 @@ export class Engine {
         if (step.type === 'wait') await sleep(step.ms ?? 0, runToken);
         else if (step.type === 'http') await this.#http(step, event);
         else if (step.type === 'ha') await this.#ha(step, event);
+        else if (step.type === 'notify') await this.#notify(step, event);
         else if (LIGHT_STEPS.has(step.type)) {
           const live = stepTargets(step).filter((t) => !tokens.get(t)?.cancelled);
           await Promise.all(live.map((t) => this.#lightStep(step, t, tokens.get(t))));
@@ -167,6 +187,24 @@ export class Engine {
       else this.log.info(`Called ${method} ${new URL(url).host} → ${res.status}`);
     } catch (err) {
       this.log.error(`Call ${method} ${url} failed: ${err.message}`);
+    }
+  }
+
+  // Throws on failure — the Connections "Send test" button shows the error.
+  async sendNtfy(step, event = {}) {
+    const { url, init } = ntfyRequest(step, this.getConfig().ntfy, event);
+    const res = await fetch(url, { ...init, signal: AbortSignal.timeout(10_000) }).catch((err) => {
+      throw new Error(`can't reach ${url} (${err.cause?.code ?? err.message})`);
+    });
+    if (!res.ok) throw new Error(`HTTP ${res.status}${res.status === 401 || res.status === 403 ? ' (check the access token)' : ''}`);
+    this.log.info(`Phone alert sent → ${JSON.parse(init.body).topic}`);
+  }
+
+  async #notify(step, event) {
+    try {
+      await this.sendNtfy(step, event);
+    } catch (err) {
+      this.log.error(`Phone alert failed: ${err.message}`);
     }
   }
 

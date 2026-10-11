@@ -75,6 +75,7 @@ export function createServer(app) {
       },
       alexa: { enabled: c.alexa.enabled !== false, port: c.alexa.port ?? 80, status: alexa.status, items: alexa.items().map(({ id, key, name, kind }) => ({ id, key, name, kind })), hidden: c.alexa.hidden ?? [] },
       ai: { ready: assistant.ready, model: assistant.model, fromEnv: Boolean(process.env.ANTHROPIC_API_KEY) },
+      ntfy: { server: c.ntfy.server, topic: c.ntfy.topic, hasToken: Boolean(c.ntfy.token) },
       location: c.location,
       sky: { sunrise: sun?.sunrise, sunset: sun?.sunset, moon: moonName(phase), moonPhase: phase },
       network: { status: discovery.status, online: discovery.list().filter((d) => d.online).length, total: discovery.devices.size },
@@ -287,6 +288,28 @@ export function createServer(app) {
       updateConfig((c) => (c.alexa = { ...c.alexa, ...('enabled' in body ? { enabled: body.enabled } : {}), ...(body.port ? { port: +body.port } : {}), ...(body.hidden ? { hidden: body.hidden } : {}) }));
       alexa.stop();
       alexa.start();
+      return { ok: true };
+    },
+
+    // ---------- phone alerts (ntfy) ----------
+    'POST /api/ntfy/settings': async (req) => {
+      const { server, topic, token } = await readJson(req);
+      if (server !== undefined && server !== '' && !/^https?:\/\/[^\s/]+/.test(server)) throw new HttpError(400, 'Server must be a full http(s) URL');
+      if (topic !== undefined && topic !== '' && !/^[\w-]{1,64}$/.test(topic)) throw new HttpError(400, 'Topic can only use letters, numbers, - and _ (max 64)');
+      updateConfig((c) => (c.ntfy = {
+        ...c.ntfy,
+        ...(server !== undefined ? { server: server.trim() || 'https://ntfy.sh' } : {}),
+        ...(topic !== undefined ? { topic } : {}),
+        ...(token !== undefined ? { token } : {}),
+      }));
+      return { ok: true };
+    },
+    'POST /api/ntfy/test': async () => {
+      try {
+        await engine.sendNtfy({ title: 'Playlite', message: 'Test alert — phone alerts are working 🎉', tags: 'bulb' });
+      } catch (err) {
+        throw new HttpError(400, err.message);
+      }
       return { ok: true };
     },
 

@@ -40,7 +40,9 @@ const STEP_TYPES = [
   ['wait', '⏱', 'Wait'],
   ['http', '🌐', 'Call a URL'],
   ['ha', '🏠', 'Home Assistant action'],
+  ['notify', '📲', 'Phone alert'],
 ];
+const NTFY_PRIORITIES = [[1, 'Min'], [2, 'Low'], [3, 'Normal'], [4, 'High'], [5, 'Urgent']];
 const KIND_ICON = {
   phone: '📱', tablet: '📱', apple: '🍎', computer: '💻', printer: '🖨', router: '🛜', camera: '📷', doorbell: '🔔',
   thermostat: '🌡', echo: '🗣', google: '🗣', chromecast: '📺', 'android-tv': '📺', 'fire-tv': '📺', tv: '📺', roku: '📺',
@@ -161,6 +163,7 @@ function describeStep(step) {
   if (step.type === 'wait') return `⏱ wait ${sec(step.ms)}s`;
   if (step.type === 'http') return `🌐 ${esc(step.method ?? 'POST')} ${esc(step.url)}`;
   if (step.type === 'ha') return `🏠 ${esc(step.service)} ${esc(step.data?.entity_id ?? '')}`;
+  if (step.type === 'notify') return `📲 “${esc(step.title ? `${step.title}: ${step.message}` : step.message)}”${step.topic ? ` → ${esc(step.topic)}` : ''}${step.priority >= 4 ? ' (high priority)' : ''}`;
   if (step.type === 'pulse') return `✨ pulse ${step.levels.join('→')}% ×${step.times} (${sec(step.stepMs)}s/step)${step.restore ? ', then restore' : ''}${t}`;
   const parts = [];
   if (step.on === false || step.brightness === 0) parts.push('off');
@@ -387,6 +390,20 @@ function stepEditor(step, i) {
         <datalist id="hasvc">${['light.turn_on', 'light.turn_off', 'switch.turn_on', 'switch.turn_off', 'scene.turn_on', 'script.turn_on', 'climate.set_temperature', 'media_player.media_pause', 'media_player.media_play', 'lock.lock', 'cover.close_cover', 'notify.notify', 'tts.speak'].map((s) => `<option value="${s}">`).join('')}</datalist>
         <label class="field grow">Entity<input type="text" data-bind="${p}.data.entity_id" value="${esc(step.data?.entity_id)}" placeholder="switch.fan" list="haents"></label>
       </div>`;
+  } else if (step.type === 'notify') {
+    const topicSet = Boolean(S.state.ntfy?.topic);
+    body = `<div class="fields">
+        <label class="field grow">Title<input type="text" data-bind="${p}.title" value="${esc(step.title)}" placeholder="optional"></label>
+        <label class="field">Priority<select data-bind="${p}.priority" data-type="num">${NTFY_PRIORITIES.map(([v, n]) => `<option value="${v}" ${(step.priority ?? 3) === v ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      </div>
+      <label class="field">Message<textarea data-bind="${p}.message" rows="2" placeholder="{{player}} started {{title}}">${esc(step.message)}</textarea></label>
+      <details><summary class="small muted">More options</summary>
+        <div class="fields" style="margin-top:8px">
+          <label class="field">Topic<input type="text" data-bind="${p}.topic" value="${esc(step.topic)}" placeholder="${esc(S.state.ntfy?.topic || 'default')}"></label>
+          <label class="field grow">Tags / emoji<input type="text" data-bind="${p}.tags" value="${esc(Array.isArray(step.tags) ? step.tags.join(', ') : step.tags)}" placeholder="movie_camera, warning"></label>
+          <label class="field grow">Open link when tapped<input type="text" data-bind="${p}.click" value="${esc(step.click)}" placeholder="https://…"></label>
+        </div></details>
+      <p class="muted small" style="margin:0">Use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} to insert details from the trigger.${topicSet ? '' : ' <span style="color:var(--warn)">Set up Phone alerts under Connections first.</span>'}</p>`;
   }
   const custom = (step.type === 'set' || step.type === 'pulse') && step.targets?.length;
   return `
@@ -618,6 +635,7 @@ function newStep(type) {
   if (type === 'wait') return { type, ms: 1000 };
   if (type === 'http') return { type, method: 'POST', url: '' };
   if (type === 'ha') return { type, service: 'switch.turn_on', data: { entity_id: '' } };
+  if (type === 'notify') return { type, message: '', priority: 3 };
   return { type: 'set', brightness: 50, transitionMs: 3000 };
 }
 
@@ -776,7 +794,8 @@ function statusPill(ok, text, bad = false) {
 
 function renderConnections() {
   const el = $('#tab-connections');
-  const { plex, hue, govee, urls, homeassistant: ha, alexa, ai, location: loc, sky } = S.state;
+  const { plex, hue, govee, urls, homeassistant: ha, alexa, ai, ntfy, location: loc, sky } = S.state;
+  const ntfyWeb = `${(ntfy.server || 'https://ntfy.sh').replace(/\/+$/, '')}/${encodeURIComponent(ntfy.topic || '')}`;
   const alexaOk = alexa.status.http === 'listening';
   el.innerHTML = `
     <div class="grid2">
@@ -853,6 +872,22 @@ function renderConnections() {
         <div class="small"><b>Ask Playlite anything</b> — add <i>Dictate Text</i> first, put it after <code>q=</code>, then <i>Speak Text</i> the result:</div>
         ${copyBox(urls.ask)}
         <p class="small muted" style="margin:0">Also great as iPhone Personal Automations: arrive home, leave, alarm stopped, Focus on, NFC tag tapped.</p>
+      </div>
+
+      <div class="card stack">
+        <div class="row spread"><h2>📲 Phone alerts</h2>${statusPill(Boolean(ntfy.topic), ntfy.topic ? 'Ready' : 'Not set up')}</div>
+        <p class="small muted" style="margin:0">Uses <b>ntfy</b> — free, no account. Install the ntfy app (iPhone or Android), tap <b>+</b>, and subscribe to the same topic name you enter here. Then add a “📲 Phone alert” step to any workflow.</p>
+        <div class="fields">
+          <label class="field grow">Topic<input type="text" id="ntfy-topic" value="${esc(ntfy.topic)}" placeholder="e.g. playlite-${Math.random().toString(36).slice(2, 8)}"></label>
+          <button class="btn primary" id="ntfy-save">Save</button>
+          <button class="btn" id="ntfy-test" ${ntfy.topic ? '' : 'disabled'}>Send test</button>
+        </div>
+        <p class="small muted" style="margin:0">On the public ntfy.sh server <b>anyone who knows the topic can read your alerts</b> — pick something hard to guess.${ntfy.topic ? ` Also viewable at <code>${esc(ntfyWeb)}</code>.` : ''}</p>
+        <details><summary class="small muted">Self-hosted server or access token (optional)</summary>
+          <div class="fields" style="margin-top:10px">
+            <label class="field grow">Server<input type="text" id="ntfy-server" value="${esc(ntfy.server)}" placeholder="https://ntfy.sh"></label>
+            <label class="field grow">Access token<input type="password" id="ntfy-token" placeholder="${ntfy.hasToken ? '•••••• (saved)' : 'tk_…'}"></label>
+          </div></details>
       </div>
 
       <div class="card stack">
@@ -945,6 +980,17 @@ function renderConnections() {
     setTimeout(refresh, 800);
     toast('Saved');
   });
+  $('#ntfy-save').onclick = guard(async () => {
+    const body = { topic: $('#ntfy-topic').value.trim(), server: $('#ntfy-server').value.trim() };
+    if ($('#ntfy-token').value.trim()) body.token = $('#ntfy-token').value.trim();
+    await api('POST', '/api/ntfy/settings', body);
+    toast('Phone alerts saved');
+    await refresh();
+  });
+  $('#ntfy-test').onclick = guard(async (e) => busy(e.target, 'Sending…', async () => {
+    await api('POST', '/api/ntfy/test');
+    toast('Test alert sent — check your phone');
+  }));
   $('#ai-save').onclick = guard(async () => {
     const body = { model: $('#ai-model').value.trim() };
     if ($('#ai-key').value.trim()) body.apiKey = $('#ai-key').value.trim();

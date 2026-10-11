@@ -124,7 +124,7 @@ heading home → pre-warm the house.
 
 | Channel | How | Effort |
 |---|---|---|
-| **ntfy** push (iOS/Android, self-hostable, no account) | HTTP POST | 🟢 |
+| ✅ **ntfy** push (iOS/Android, self-hostable, no account) | HTTP POST | done |
 | Pushover | HTTP API | 🟢 Cloud |
 | Telegram bot — **two-way**: "/movie" runs a routine, alerts come back with camera snapshots | Bot API | 🟡 Cloud |
 | SMS / voice call for emergencies | Twilio | 🟢 Cloud |
@@ -224,13 +224,13 @@ Ideas: person in driveway after dark → porch lights 100% for 5 min · package 
 
 ## Suggested build order
 
-**Done so far:** login · IF/THEN builder + AI drafting · always-on network discovery · Home Assistant bridge · Alexa (local) · Siri Shortcuts · MCP for AI agents · sun/moon/schedule triggers · webhooks in & out.
+**Done so far:** login · IF/THEN builder + AI drafting · always-on network discovery · Home Assistant bridge · Alexa (local) · Siri Shortcuts · MCP for AI agents · sun/moon/schedule triggers · webhooks in & out · ntfy phone alerts.
 
 **Phase 1 — Platform** (makes everything else cheap)
 1. Plugin API + capability model; move Plex/Hue/Govee into plugins
 2. Multiple triggers, AND/OR conditions, "for N minutes", house modes, scenes
 3. **Sun / moon / schedule triggers** (offline, no setup)
-4. **ntfy phone notifications** as an action
+4. ✅ **ntfy phone notifications** as an action
 
 **Phase 2 — Reach** (most devices for the least work)
 5. **MQTT** (unlocks Zigbee2MQTT, Frigate, rtl_433, OwnTracks, Tasmota, ESPHome)

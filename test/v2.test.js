@@ -7,7 +7,7 @@ import { sunTimes, moonPhase, isFullMoon } from '../src/solar.js';
 import { Auth } from '../src/auth.js';
 import { handleMcp } from '../src/mcp.js';
 import { createTools, normalizeWorkflow } from '../src/tools.js';
-import { Engine, matchesTrigger, template } from '../src/engine.js';
+import { Engine, matchesTrigger, template, ntfyRequest } from '../src/engine.js';
 import { nextFireToday } from '../src/scheduler.js';
 import { classify, vendorFor, pickName } from '../src/discovery.js';
 import { encodeQuery, decodePacket } from '../src/dns.js';
@@ -138,4 +138,42 @@ test('dns codec round-trips a query', () => {
   const pkt = decodePacket(Buffer.concat([header, question, answer]));
   assert.ok(pkt.response);
   assert.equal(pkt.records[0].data, 'Bridg._hue._tcp.local');
+});
+
+test('notify: ntfy request, validation, and a routine sends it', async () => {
+  const event = { player: 'Living Room', title: 'Dune' };
+  const { url, init } = ntfyRequest(
+    { message: '{{player}} started {{title}}', title: 'Movie', priority: 4, tags: 'movie_camera, popcorn', click: 'https://x.test/{{title}}' },
+    { server: 'https://ntfy.example.com/', topic: 'den-abc', token: 'tk_secret' },
+    event,
+  );
+  assert.equal(url, 'https://ntfy.example.com');
+  assert.equal(init.headers.Authorization, 'Bearer tk_secret');
+  assert.deepEqual(JSON.parse(init.body), { topic: 'den-abc', message: 'Living Room started Dune', title: 'Movie', priority: 4, tags: ['movie_camera', 'popcorn'], click: 'https://x.test/Dune' });
+  // step topic overrides the default; no token → no auth header; defaults to ntfy.sh
+  const plain = ntfyRequest({ message: 'hi', topic: 'other' }, { topic: 'den-abc' });
+  assert.equal(plain.url, 'https://ntfy.sh');
+  assert.equal(JSON.parse(plain.init.body).topic, 'other');
+  assert.equal(plain.init.headers.Authorization, undefined);
+  assert.throws(() => ntfyRequest({ message: 'hi' }, {}), /topic/);
+
+  const wf = (step) => ({ name: 'a', trigger: { source: 'x', event: 'y' }, steps: [{ type: 'notify', ...step }] });
+  assert.throws(() => normalizeWorkflow(wf({ message: ' ' })), /message/);
+  assert.throws(() => normalizeWorkflow(wf({ message: 'hi', priority: 9 })), /priority/);
+  assert.throws(() => normalizeWorkflow(wf({ message: 'hi', click: 'javascript:alert(1)' })), /click/);
+  assert.ok(normalizeWorkflow(wf({ message: 'hi', priority: 5 })));
+
+  const { engine, config } = fakeCtx();
+  config.ntfy = { server: 'https://ntfy.sh', topic: 'den-abc', token: '' };
+  const sent = [];
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (u, opts) => (sent.push({ u, body: JSON.parse(opts.body) }), { ok: true, status: 200 });
+  try {
+    await engine.run({ id: 'r1', name: 'alert', steps: [{ type: 'notify', message: '{{title}} is on' }] }, { source: 'plex', type: 'media.play', title: 'Dune' });
+    globalThis.fetch = async () => ({ ok: false, status: 403 });
+    await assert.rejects(engine.sendNtfy({ message: 'x' }), /403.*token/);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.deepEqual(sent, [{ u: 'https://ntfy.sh', body: { topic: 'den-abc', message: 'Dune is on' } }]);
 });

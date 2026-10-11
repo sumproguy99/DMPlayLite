@@ -68,6 +68,7 @@ function defaults() {
     homeassistant: { url: '', token: '' },
     alexa: { enabled: true, port: 80, ids: {}, hidden: [] },
     ai: { apiKey: '', model: '' },
+    ntfy: { server: 'https://ntfy.sh', topic: '', token: '' },
     location: { lat: null, lon: null, name: '' },
     groups: [
       { id: 'living-room', name: 'Living Room', members: [] },
@@ -85,7 +86,7 @@ export function loadConfig() {
     const stored = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     const base = defaults();
     current = { ...base, ...stored };
-    for (const key of ['plex', 'hue', 'govee', 'homeassistant', 'alexa', 'ai', 'location']) {
+    for (const key of ['plex', 'hue', 'govee', 'homeassistant', 'alexa', 'ai', 'ntfy', 'location']) {
       current[key] = { ...base[key], ...stored[key] };
     }
   } else {
