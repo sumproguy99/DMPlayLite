@@ -18,6 +18,7 @@ import { WledDriver } from '../src/integrations/wled.js';
 import { HueSensors } from '../src/integrations/huesensors.js';
 import { PlexIntegration } from '../src/integrations/plex.js';
 import { Roku } from '../src/integrations/roku.js';
+import { Weather, conditionOf, conditionIs, readingMatches } from '../src/integrations/weather.js';
 import http from 'node:http';
 
 test('sunrise/sunset are plausible (Nashville, June 21)', () => {
@@ -646,4 +647,100 @@ test('plex control: picks the player, relays via the server, falls back to the p
   assert.match(errors.join(), /Roku: the Roku refused/);
   assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'webhook', event: 'x' }, steps: [{ type: 'plex', action: 'dance' }] }), /plex step action/);
   assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'webhook', event: 'x' }, steps: [{ type: 'roku' }] }), /roku step needs/);
+});
+
+test('weather: conditions, crossings, alerts (new / update / ended / outside US), workflows', async (t) => {
+  assert.equal(conditionOf(0), 'clear');
+  assert.equal(conditionOf(3), 'cloudy');
+  assert.equal(conditionOf(63), 'rain');
+  assert.equal(conditionOf(75), 'snow');
+  assert.equal(conditionOf(95), 'storm');
+  assert.ok(conditionIs('storm', 'rain') && !conditionIs('rain', 'storm'));
+  assert.ok(readingMatches({ below: 32 }, 31, 33) && !readingMatches({ below: 32 }, 31, 31) && !readingMatches({ below: 32 }, 31, null));
+  assert.ok(readingMatches({ below: 32 }, 31, 31, { crossing: false }) && !readingMatches({ above: 90 }, 85, 80));
+
+  let now = { temperature_2m: 40, apparent_temperature: 36, relative_humidity_2m: 80, weather_code: 3, wind_speed_10m: 5, wind_gusts_10m: 12, is_day: 1 };
+  let features = [];
+  let outsideUs = false;
+  const seen = [];
+  const server = await listen((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    seen.push(url.pathname === '/v1/forecast' ? `wx ${url.searchParams.get('latitude')},${url.searchParams.get('longitude')} ${url.searchParams.get('temperature_unit')}` : `nws ${url.searchParams.get('point')} ${/Playlite/.test(req.headers['user-agent'])}`);
+    if (url.pathname === '/v1/forecast') return res.end(JSON.stringify({ current: now, daily: { temperature_2m_max: [45], temperature_2m_min: [28] } }));
+    if (url.pathname === '/alerts/active') return outsideUs ? res.writeHead(400).end('{}') : res.end(JSON.stringify({ features: features.map((p) => ({ properties: p })) }));
+    res.writeHead(404).end();
+  });
+  t.after(() => server.close());
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const config = { routines: [], location: { lat: 36.16218, lon: -86.77437 }, weather: { units: 'f' } };
+  const log = { info() {}, warn() {}, error() {}, event() {} };
+  const weather = Object.assign(new Weather(() => config, log), { weatherUrl: base, alertsUrl: base });
+  const engine = new Engine({ getConfig: () => config, lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, weather });
+  const fired = [];
+  engine.fire = (r, e) => fired.push(`${r.id}:${e.type}${e.alert ? ` ${e.alert}` : ''}`);
+  weather.on('event', (e) => engine.handle(e));
+  const steps = [{ type: 'wait', ms: 0 }];
+  config.routines = [
+    { id: 'rain', enabled: true, name: 'Rain starts', trigger: { source: 'weather', event: 'condition', to: 'rain' }, steps },
+    { id: 'frost', enabled: true, name: 'Frost', trigger: { source: 'weather', event: 'reading', reading: 'temperature', below: 32 }, steps },
+    { id: 'gusty', enabled: true, name: 'Gusty', trigger: { source: 'weather', event: 'reading', reading: 'gusts', above: 30 }, steps },
+    { id: 'tornado', enabled: true, name: 'Tornado', trigger: { source: 'weather', event: 'alert', alert: 'tornado', severity: 'Severe' }, steps },
+    { id: 'clear', enabled: true, name: 'All clear', trigger: { source: 'weather', event: 'alert.ended', alert: 'tornado' }, steps },
+  ];
+
+  await weather.pollWeather(); // first reading: nothing "changes"
+  assert.equal(weather.current.condition, 'cloudy');
+  assert.equal(weather.current.high, 45);
+  assert.equal(seen[0], 'wx 36.16,-86.77 fahrenheit'); // rounded before it leaves the PC
+  assert.deepEqual(fired, []);
+  now = { ...now, temperature_2m: 31, weather_code: 63 };
+  await weather.pollWeather();
+  assert.deepEqual(fired, ['rain:condition', 'frost:reading']);
+  now = { ...now, temperature_2m: 30, weather_code: 95, wind_gusts_10m: 40 }; // rain → storm is still rain; already below 32
+  await weather.pollWeather();
+  assert.deepEqual(fired, ['rain:condition', 'frost:reading', 'gusty:reading']);
+
+  // conditions read the latest weather
+  const cond = (c) => engine.blockedBy({ conditions: c });
+  assert.equal(cond({ weather: { condition: 'rain' } }), null); // storm counts as rain
+  assert.equal(cond({ weather: { condition: ['snow', 'clear'] } }), 'weather is storm');
+  assert.equal(cond({ weather: { reading: 'temperature', below: 40 } }), null);
+  assert.equal(cond({ weather: { reading: 'temperature', above: 50 } }), 'temperature is 30');
+
+  // alerts: an old one at start-up is not announced, a fresh one is; an update isn't news; the end is
+  fired.length = 0;
+  const ago = (min) => new Date(Date.now() - min * 60_000).toISOString();
+  features = [
+    { id: 'a1', event: 'Wind Advisory', severity: 'Moderate', headline: 'Wind Advisory until 6 PM', sent: ago(90), messageType: 'Alert' },
+    { id: 't1', event: 'Tornado Warning', severity: 'Extreme', headline: 'Tornado Warning until 4:15 PM', sent: ago(2), messageType: 'Alert', instruction: 'Take cover now!' },
+  ];
+  const events = [];
+  weather.on('event', (e) => events.push(e));
+  await weather.pollAlerts();
+  assert.match(seen.at(-1), /^nws 36\.162,-86\.774 true$/);
+  assert.deepEqual(fired, ['tornado:alert Tornado Warning']);
+  assert.equal(events[0].instruction, 'Take cover now!');
+  assert.equal(weather.alerts.length, 2);
+  weather.restart(); // e.g. units changed: the same alert isn't announced again
+  weather.stop();
+  await weather.pollAlerts();
+  assert.deepEqual(fired, ['tornado:alert Tornado Warning']);
+  features = [features[0], { ...features[1], id: 't2', messageType: 'Update', sent: ago(0), references: [{ identifier: 't1' }] }];
+  await weather.pollAlerts();
+  assert.deepEqual(fired, ['tornado:alert Tornado Warning']);
+  features = [features[0], { id: 's1', event: 'Tornado Watch', severity: 'Moderate', sent: ago(0), messageType: 'Alert' }];
+  await weather.pollAlerts();
+  assert.deepEqual(fired, ['tornado:alert Tornado Warning', 'clear:alert.ended Tornado Warning']); // Moderate watch is below "Severe"
+  outsideUs = true;
+  assert.deepEqual(await weather.pollAlerts(), []);
+  assert.match(weather.status.alerts, /only cover the US/);
+
+  // validation
+  const w = { name: 'w', steps };
+  assert.equal(normalizeWorkflow({ ...w, trigger: { source: 'weather', event: 'reading', below: '32' } }).trigger.reading, 'temperature');
+  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'weather', event: 'reading', reading: 'temperature' } }), /below/);
+  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'weather', event: 'condition', to: 'hail' } }), /must be one of/);
+  assert.equal(normalizeWorkflow({ ...w, trigger: { source: 'weather', event: 'condition', to: 'rain', forMin: 30 } }).trigger.forMin, 30);
+  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'weather', event: 'alert', forMin: 5 } }), /only works with/);
+  assert.throws(() => normalizeWorkflow({ ...w, trigger: { source: 'webhook', event: 'x' }, conditions: { weather: { condition: 'sunny' } } }), /must be one of/);
 });

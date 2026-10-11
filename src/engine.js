@@ -9,23 +9,27 @@
 //   webhook        event: <name>   (/hooks/<name>, Siri Shortcuts, IFTTT, Zapier, HA rest_command…)
 //   voice          event: alexa    device (exposed name contains)
 //   mode           event: mode.changed  to, from (house mode names)
-// Conditions: timeWindow {from,to} · dark · fullMoon · presence {device, state: home|away} · mode (name or list) · cooldownSec
+//   weather        event: condition (to: clear|cloudy|fog|rain|snow|storm) | reading (reading, above|below) | alert | alert.ended (alert, severity)
+// Conditions: timeWindow {from,to} · dark · fullMoon · weather {condition | reading + above/below} · presence {device, state: home|away} · mode (name or list) · cooldownSec
 // Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click} · mode {mode}
 import { Token, contains, randomId, sleep } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
 import { topicMatches } from './integrations/mqtt.js';
+import { conditionIs, readingMatches, severityAtLeast } from './integrations/weather.js';
 
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
 export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
 // "…and it stays that way for N minutes" — only for triggers that describe a state that can end.
-export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue'];
-export const canHold = (t) => HOLD_SOURCES.includes(t?.source) && !['device.new', 'media.scrobble', 'button'].includes(t.event);
+export const HOLD_SOURCES = ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue', 'weather'];
+export const canHold = (t) => HOLD_SOURCES.includes(t?.source) && !['device.new', 'media.scrobble', 'button', 'alert', 'alert.ended'].includes(t.event);
 // What an event is about: one HA entity, one network device, one Plex player (player vs media state), the house mode.
-export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? e.topic ?? ''}`;
-export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device));
+export const subjectOf = (e) => `${e.source}|${String(e.type).split('.')[0]}|${e.entity ?? e.mac ?? e.playerId ?? e.player ?? e.device ?? e.topic ?? e.reading ?? ''}`;
+const hasWeather = (w) => Boolean(w && (w.condition || (w.reading && (num(w.above) || num(w.below)))));
+export const hasConditions = (c) => Boolean(c && (c.timeWindow || c.dark || c.light || c.fullMoon || c.mode?.length || c.presence?.device || hasWeather(c.weather)));
 // Condition groups that actually check something: "conditions" OR any of "orConditions".
 export const conditionGroups = (routine) => [routine.conditions, ...(routine.orConditions ?? [])].filter(hasConditions);
 
+const num = (v) => v !== '' && v != null && Number.isFinite(Number(v));
 const sameValue = (a, b) => String(a !== null && typeof a === 'object' ? JSON.stringify(a) : a).trim().toLowerCase() === String(b).trim().toLowerCase();
 const pathOf = (obj, path) => String(path).split('.').reduce((o, k) => o?.[k], obj);
 
@@ -42,9 +46,17 @@ function matchesMqtt(t, e, { ignoreChange = false } = {}) {
   return true;
 }
 
+// Weather: the sky turning to rain/snow/…, a reading crossing a level, or an NWS alert (name contains, minimum severity).
+function matchesWeather(t, e, { ignoreChange = false } = {}) {
+  if (e.type === 'condition') return !t.to || (conditionIs(e.to, t.to) && (ignoreChange || !conditionIs(e.from, t.to)));
+  if (e.type === 'reading') return (t.reading || 'temperature') === e.reading && readingMatches(t, e.value, e.prev, { crossing: !ignoreChange });
+  return (!t.alert || contains(e.alert, t.alert)) && severityAtLeast(e.severity, t.severity);
+}
+
 export function matchesTrigger(trigger, event, opts) {
   if (!trigger || trigger.source !== event.source || trigger.event !== event.type) return false;
   if (trigger.source === 'mqtt') return matchesMqtt(trigger, event, opts);
+  if (trigger.source === 'weather') return matchesWeather(trigger, event, opts);
   if (trigger.player && !contains(event.player, trigger.player)) return false;
   if (trigger.user && !contains(event.user, trigger.user)) return false;
   if (trigger.mediaTypes?.length && event.mediaType && !trigger.mediaTypes.includes(event.mediaType)) return false;
@@ -109,7 +121,7 @@ export class Engine {
   #modeChanges = []; // timestamps, to stop workflows flipping the mode back and forth forever
   #holds = new Map(); // routine|trigger|subject -> { timer, trigger, subject, name } for "for N minutes" triggers
 
-  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null, plex = null, roku = null }) {
+  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null, plex = null, roku = null, weather = null }) {
     this.getConfig = getConfig;
     this.updateConfig = updateConfig;
     this.lights = lights;
@@ -119,6 +131,7 @@ export class Engine {
     this.mqtt = mqtt;
     this.plex = plex;
     this.roku = roku;
+    this.weather = weather;
   }
 
   // House mode: one current mode (home, away, movie…). Changing it fires { source: 'mode', type: 'mode.changed', from, to }.
@@ -145,7 +158,7 @@ export class Engine {
   }
 
   handle(event) {
-    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.source === 'hue' && (event.to ?? `button ${event.button ?? ''} ${event.press}`), event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`]
+    const desc = [event.type, event.source === 'mode' && `${event.from} → ${event.to}${event.by ? ` (by ${event.by})` : ''}`,event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.source === 'hue' && (event.to ?? `button ${event.button ?? ''} ${event.press}`), event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`, event.topic && `${event.topic} ${String(event.payload).slice(0, 120)}`, event.source === 'weather' && (event.type === 'reading' ? `${event.reading} ${event.value}` : event.type === 'condition' ? `${event.from} → ${event.to}` : `${event.alert}${event.headline ? ` — ${event.headline}` : ''}`)]
       .filter(Boolean)
       .join(' ');
     // chatty sources (MQTT) can send many messages a second — log only the ones that start or end something
@@ -230,6 +243,13 @@ export class Engine {
     if (c.light && isDark(now, loc.lat, loc.lon)) return 'it is dark';
     if (c.fullMoon && !isFullMoon(now)) return 'not a full moon';
     if (c.mode?.length && ![c.mode].flat().includes(this.mode)) return `mode is ${this.mode}`;
+    if (hasWeather(c.weather)) {
+      const now = this.weather?.current;
+      if (!now) return 'no weather yet (set your location)';
+      const w = c.weather;
+      if (w.condition && ![w.condition].flat().some((x) => conditionIs(now.condition, x))) return `weather is ${now.condition}`;
+      if (w.reading && (num(w.above) || num(w.below)) && !readingMatches(w, now[w.reading], null, { crossing: false })) return `${w.reading} is ${now[w.reading]}`;
+    }
     if (c.presence?.device && this.discovery) {
       const home = this.discovery.find(c.presence.device).some((d) => d.online);
       if (c.presence.state === 'home' && !home) return `${c.presence.device} is away`;

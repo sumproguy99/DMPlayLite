@@ -10,6 +10,7 @@ const SOURCES = [
   { id: 'webhook', icon: '🔗', name: 'Webhook / Siri', blurb: 'Shortcuts, IFTTT, Zapier, anything' },
   { id: 'mode', icon: '🎭', name: 'House mode', blurb: 'Home, away, movie, sleep…' },
   { id: 'mqtt', icon: '📡', name: 'MQTT', blurb: 'Zigbee2MQTT, Tasmota, sensors…' },
+  { id: 'weather', icon: '🌦', name: 'Weather', blurb: 'Rain, temperature, storm alerts' },
 ];
 const EVENTS = {
   plex: [
@@ -36,6 +37,28 @@ const EVENTS = {
   webhook: [],
   mode: [['mode.changed', 'House mode changes']],
   mqtt: [['message', 'A message arrives']],
+  weather: [
+    ['condition', 'The sky changes (rain starts…)'],
+    ['reading', 'Temperature / wind crosses a level'],
+    ['alert', 'A severe-weather alert is issued (US)'],
+    ['alert.ended', 'A weather alert ends (US)'],
+  ],
+};
+const SKIES = [['clear', '☀️ Clear'], ['cloudy', '☁️ Cloudy'], ['fog', '🌫 Fog'], ['rain', '🌧 Rain (or storms)'], ['snow', '🌨 Snow'], ['storm', '⛈ Thunderstorm']];
+const SKY_ICON = { clear: '☀️', cloudy: '☁️', fog: '🌫', rain: '🌧', snow: '🌨', storm: '⛈' };
+const READINGS = [['temperature', 'Temperature'], ['feelsLike', 'Feels like'], ['humidity', 'Humidity'], ['wind', 'Wind speed'], ['gusts', 'Wind gusts']];
+const SEVERITIES = [['', 'Any'], ['Moderate', 'Moderate or worse'], ['Severe', 'Severe or worse'], ['Extreme', 'Extreme only']];
+const unitOf = (reading) => {
+  const metric = S.state?.weather?.units === 'c';
+  return reading === 'humidity' ? '%' : reading === 'wind' || reading === 'gusts' ? (metric ? ' km/h' : ' mph') : metric ? '°C' : '°F';
+};
+const SKY_WORDS = { clear: 'clear', cloudy: 'cloudy', fog: 'foggy', rain: 'raining', snow: 'snowing', storm: 'storming' };
+// "temperature drops below 32°F" (trigger) / "temperature is below 40°F" (condition)
+const readingText = (o, trigger) => {
+  const name = (READINGS.find(([k]) => k === (o.reading || 'temperature'))?.[1] ?? o.reading).toLowerCase();
+  const has = (v) => v != null && v !== '';
+  const parts = [has(o.above) && `${trigger ? 'rises' : 'is'} above ${o.above}${unitOf(o.reading)}`, has(o.below) && `${trigger ? 'drops' : 'is'} below ${o.below}${unitOf(o.reading)}`];
+  return `${name} ${parts.filter(Boolean).join(' and ')}`;
 };
 const MEDIA_TYPES = [['movie', 'Movies'], ['episode', 'TV episodes'], ['clip', 'Clips'], ['track', 'Music']];
 const WHITES = [[2200, 'Candle'], [2700, 'Warm'], [3000, 'Soft'], [4000, 'Natural'], [5000, 'Daylight'], [6500, 'Cool']];
@@ -212,7 +235,11 @@ function describeTrigger(tr) {
   else if (tr.source === 'time') text = `${b(tr.event === 'sun.sunset' ? 'sunset' : 'sunrise')}${tr.offsetMin ? ` ${tr.offsetMin > 0 ? '+' : '−'}${Math.abs(tr.offsetMin)} min` : ''}`;
   else if (tr.source === 'hue') text = `${b(tr.device || 'any Hue sensor')} ${tr.event === 'button' ? `${HUE_PRESSES.find(([k]) => k === (tr.press ?? 'short_release'))?.[1].toLowerCase() ?? esc(tr.press)}${tr.button ? ` on button ${b(tr.button)}` : ''}` : tr.event === 'motion' ? (tr.to === 'clear' ? 'motion clears' : tr.to === 'detected' ? 'detects motion' : 'motion changes') : tr.to ? `is ${b(tr.to)}` : 'opens or closes'}`;
   else if (tr.source === 'mqtt') text = `MQTT ${b(tr.topic || 'any topic')}${tr.field ? ` — ${b(tr.field)} changes${tr.value != null && tr.value !== '' ? ` to ${b(tr.value)}` : ''}` : tr.payload ? ` says ${b(tr.payload)}` : ''}`;
-  else if (tr.source === 'mode') text = `house mode changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
+  else if (tr.source === 'weather') {
+    if (tr.event === 'condition') text = tr.to ? `it starts to ${b(tr.to === 'clear' ? 'clear up' : tr.to === 'cloudy' ? 'cloud over' : tr.to === 'storm' ? 'storm' : tr.to)}` : 'the weather changes';
+    else if (tr.event === 'reading') text = `the ${b(readingText(tr, true))}`;
+    else text = `${tr.alert ? b(tr.alert) : `a weather alert${tr.severity ? ` (${b(tr.severity.toLowerCase())}+)` : ''}`} ${tr.event === 'alert' ? 'is issued' : 'ends'}`;
+  } else if (tr.source === 'mode') text = `house mode changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
   else if (tr.source === 'homeassistant') text = `${b(tr.entity || 'any entity')} changes${tr.from ? ` from ${b(tr.from)}` : ''}${tr.to ? ` to ${b(tr.to)}` : ''}`;
   else text = b(eventLabel(tr.source, tr.event));
   const bits = [text];
@@ -232,6 +259,8 @@ function describeConditionGroup(c = {}) {
   if (c.fullMoon) out.push('full moon');
   if (c.mode?.length) out.push(`mode is ${[c.mode].flat().join(' or ')}`);
   if (c.presence?.device) out.push(`${c.presence.device} is ${c.presence.state}`);
+  if (c.weather?.condition) out.push(`it's ${[c.weather.condition].flat().map((x) => SKY_WORDS[x] ?? x).join(' or ')}`);
+  if (c.weather?.reading && (c.weather.above != null || c.weather.below != null)) out.push(readingText(c.weather));
   return out.map(esc).join(' · ');
 }
 
@@ -341,7 +370,7 @@ function targetPicker(selected, path) {
 }
 
 // Same rule as the engine: only triggers describing a state that can end can "stay that way".
-const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue'].includes(tr.source) && !['device.new', 'media.scrobble', 'button'].includes(tr.event);
+const canHold = (tr) => ['plex', 'network', 'homeassistant', 'mode', 'mqtt', 'hue', 'weather'].includes(tr.source) && !['device.new', 'media.scrobble', 'button', 'alert', 'alert.ended'].includes(tr.event);
 
 function triggerFields(tr, base = 'trigger') {
   if (!canHold(tr)) {
@@ -424,6 +453,25 @@ function sourceFields(tr, base) {
       <p class="small muted" style="margin:6px 0 0">${tr.field ? 'Fires when that field changes — not on every repeat of the same value.' : 'Leave the JSON field empty to match the whole message (Tasmota “ON”, rtl_433 lines…).'} Use {{topic}}, {{payload}}, {{json.<i>field</i>}} in later steps.</p>
       ${S.state.mqtt?.status.connected ? '' : '<p class="small muted">Connect MQTT under Connections first.</p>'}`;
   }
+  if (tr.source === 'weather') {
+    const w = S.state.weather;
+    const opt = (v, label, cur) => `<option value="${v}" ${(cur ?? '') === v ? 'selected' : ''}>${label}</option>`;
+    // keep only the filters that belong to this kind of weather trigger
+    const keep = { condition: ['to'], reading: ['reading', 'above', 'below'] }[tr.event] ?? ['alert', 'severity'];
+    for (const k of ['to', 'reading', 'above', 'below', 'alert', 'severity']) if (!keep.includes(k)) delete tr[k];
+    if (tr.event === 'reading') tr.reading ??= 'temperature';
+    let fields = '';
+    if (tr.event === 'condition') fields = `<label class="field">Changes to<select data-bind="${base}.to">${opt('', 'Anything', tr.to)}${SKIES.map(([k, n]) => opt(k, n, tr.to)).join('')}</select></label>`;
+    else if (tr.event === 'reading') fields = readingFields(tr, base);
+    else fields = `<label class="field grow">Alert name contains<input type="text" data-bind="${base}.alert" value="${esc(tr.alert)}" placeholder="any alert, e.g. Tornado Warning" list="nwsalerts"></label>
+      <datalist id="nwsalerts">${['Tornado Warning', 'Tornado Watch', 'Severe Thunderstorm Warning', 'Flash Flood Warning', 'Winter Storm Warning', 'Heat Advisory', 'Excessive Heat Warning', 'Freeze Warning', 'Wind Advisory', 'Hurricane Warning'].map((n) => `<option value="${n}">`).join('')}</datalist>
+      <label class="field">Severity<select data-bind="${base}.severity">${SEVERITIES.map(([k, n]) => opt(k, n, tr.severity)).join('')}</select></label>`;
+    const note = !w?.enabled ? 'Weather is turned off under Connections → Location & weather.'
+      : !S.state.location?.lat ? 'Set your location under Connections → Location & weather first.'
+      : tr.event.startsWith('alert') ? (w.status?.alerts ? esc(w.status.alerts) : 'Alerts come from the US National Weather Service, checked every 2 minutes. Use {{headline}}, {{alert}}, {{instruction}} in a phone alert.')
+      : `Checked every 10 minutes${w.current ? ` — now ${SKY_ICON[w.current.condition] ?? ''} ${esc(w.current.condition)}, ${w.current.temperature}${unitOf('temperature')}` : ''}.${tr.event === 'reading' ? ' Fires when it crosses the level, not every time it’s checked.' : ''}`;
+    return `<div class="fields">${eventSelect}${fields}</div><p class="small muted" style="margin:6px 0 0">${note}</p>`;
+  }
   if (tr.source === 'mode') {
     return `<div class="fields">
       <label class="field grow">From<select data-bind="${base}.from">${modeOptions(tr.from, 'any mode')}</select></label>
@@ -444,6 +492,14 @@ function sourceFields(tr, base) {
   const url = S.state.urls.hook.replace('<name>', encodeURIComponent(tr.event || 'name'));
   return `<div class="fields"><label class="field grow">Webhook name<input type="text" data-bind="${base}.event" value="${esc(tr.event)}" placeholder="e.g. doorbell" data-rerender-blur></label></div>
     <p class="small muted" style="margin-bottom:4px">Call this URL (GET or POST) from Siri Shortcuts, IFTTT, Zapier, Home Assistant, a Stream Deck…</p>${copyBox(url)}`;
+}
+
+// reading + above/below + level; o is a trigger or a condition group's "weather"
+function readingFields(o = {}, base) {
+  const cmp = o.above != null && o.above !== '' ? 'above' : 'below';
+  return `<label class="field">${base.endsWith('.weather') ? '🌡' : 'Reading'}<select data-bind="${base}.reading">${READINGS.map(([k, n]) => `<option value="${k}" ${(o.reading ?? 'temperature') === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+      <label class="field">${base.endsWith('.weather') ? 'is' : 'Goes'}<select data-wlevel="${base}" data-part="cmp"><option value="below" ${cmp === 'below' ? 'selected' : ''}>below</option><option value="above" ${cmp === 'above' ? 'selected' : ''}>above</option></select></label>
+      <label class="field">Level <small>(${unitOf(o.reading).trim()})</small><input type="number" step="any" data-wlevel="${base}" data-part="value" value="${o[cmp] ?? ''}" placeholder="${(o.reading ?? 'temperature') === 'temperature' || o.reading === 'feelsLike' ? `e.g. ${S.state.weather?.units === 'c' ? 0 : 32}` : 'e.g. 25'}"></label>`;
 }
 
 function stepEditor(step, i) {
@@ -581,6 +637,10 @@ function conditionFields(c = {}, base) {
           <label class="field grow">Someone is…<input type="text" data-bind="${base}.presence.device" value="${esc(c.presence?.device)}" placeholder="device name, e.g. iPhone" list="netdevs2"></label>
           <label class="field">&nbsp;<select data-bind="${base}.presence.state">${['home', 'away'].map((s) => `<option ${c.presence?.state === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
         </div>
+        <div class="fields" style="margin-top:10px">
+          <label class="field">🌦 Weather is<select data-bind="${base}.weather.condition">${[['', 'any'], ...SKIES].map(([k, n]) => `<option value="${k}" ${(c.weather?.condition ?? '') === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+          ${readingFields(c.weather, `${base}.weather`)}
+        </div>
         <div class="row small" style="margin-top:10px">🎭 House mode is
           ${S.state.modes.map((m) => `<label class="daychip"><input type="checkbox" data-list="${base}.mode" value="${esc(m)}" ${[c.mode].flat().includes(m) ? 'checked' : ''}><span>${esc(m)}</span></label>`).join('')}
           <span class="muted">${c.mode?.length ? '' : '(any)'}</span></div>`;
@@ -714,15 +774,42 @@ function wireEditor() {
         if (!group.presence?.device) delete group.presence;
         else group.presence.state ??= 'home';
       }
+      const wx = el.dataset.bind.match(/^(.*)\.weather\.(condition|reading)$/);
+      if (wx) tidyWeather(getPath(draft, wx[1]));
       if (el.hasAttribute('data-rerender')) renderEditor();
     });
     if (el.hasAttribute('data-rerender-blur')) el.addEventListener('change', renderEditor);
+  });
+  // a condition group's weather check: drop empty parts so an untouched group stays empty
+  const tidyWeather = (group) => {
+    const w = group?.weather;
+    if (!w) return;
+    if (!w.condition) delete w.condition;
+    if (w.above == null && w.below == null) delete w.reading;
+    if (!Object.keys(w).length) delete group.weather;
+  };
+  dlg.querySelectorAll('[data-wlevel]').forEach((el) => {
+    el.addEventListener(el.tagName === 'SELECT' ? 'change' : 'input', () => {
+      const base = el.dataset.wlevel;
+      const cmp = dlg.querySelector(`[data-wlevel="${base}"][data-part="cmp"]`).value;
+      const val = dlg.querySelector(`[data-wlevel="${base}"][data-part="value"]`).value;
+      const o = getPath(draft, base) ?? {};
+      delete o.above;
+      delete o.below;
+      if (val !== '') {
+        o[cmp] = Number(val);
+        o.reading ??= dlg.querySelector(`[data-bind="${base}.reading"]`)?.value ?? 'temperature';
+      }
+      if (getPath(draft, base) == null) setPath(draft, base, o);
+      if (base.endsWith('.weather')) tidyWeather(getPath(draft, base.slice(0, -'.weather'.length)));
+    });
   });
   const blankTrigger = (src) => {
     const t = { source: src, event: EVENTS[src][0]?.[0] ?? '' };
     if (src === 'plex') t.mediaTypes = ['movie', 'episode', 'clip'];
     if (src === 'time') t.at = '18:00';
     if (src === 'hue') t.to = 'detected';
+    if (src === 'weather') t.to = 'rain';
     if (src === 'network' && !S.network.length) refreshNetwork().then(renderEditor).catch(() => {});
     return t;
   };
@@ -1080,7 +1167,7 @@ function statusPill(ok, text, bad = false) {
 
 function renderConnections() {
   const el = $('#tab-connections');
-  const { plex, hue, govee, wled, urls, homeassistant: ha, alexa, ai, ntfy, mqtt, location: loc, sky } = S.state;
+  const { plex, hue, govee, wled, urls, homeassistant: ha, alexa, ai, ntfy, mqtt, location: loc, sky, weather: wx } = S.state;
   const ntfyWeb = `${(ntfy.server || 'https://ntfy.sh').replace(/\/+$/, '')}/${encodeURIComponent(ntfy.topic || '')}`;
   const alexaOk = alexa.status.http === 'listening';
   el.innerHTML = `
@@ -1219,14 +1306,20 @@ function renderConnections() {
       </div>
 
       <div class="card stack">
-        <h2>📍 Location</h2>
-        <p class="small muted" style="margin:0">Used for sunrise/sunset and “only when dark”. Computed on this PC — nothing is sent anywhere after lookup.</p>
+        <h2>📍 Location &amp; weather</h2>
+        <p class="small muted" style="margin:0">Used for sunrise/sunset and “only when dark” (worked out on this PC) and for weather. Weather checks send a rounded location to Open-Meteo, and to the US National Weather Service for alerts — no account or key.</p>
         <div class="fields">
           <label class="field grow">City or ZIP<input type="text" id="loc-q" placeholder="${esc(loc?.name || 'e.g. Nashville')}"></label>
           <button class="btn" id="loc-find">Look up</button>
         </div>
         <div id="loc-results"></div>
         ${loc?.lat ? `<div class="sky"><span>📍 ${esc(loc.name || `${loc.lat}, ${loc.lon}`)}</span><span>🌅 ${timeOf(sky.sunrise)}</span><span>🌇 ${timeOf(sky.sunset)}</span><span>${sky.moon === 'Full moon' ? '🌕' : '🌙'} ${esc(sky.moon)}</span></div>` : '<p class="small" style="color:var(--warn);margin:0">Not set yet.</p>'}
+        ${weatherBox(wx)}
+        <div class="row small" style="gap:16px">
+          <label class="row"><input type="checkbox" id="wx-on" ${wx?.enabled !== false ? 'checked' : ''}> Check the weather</label>
+          <label class="row"><input type="checkbox" id="wx-alerts" ${wx?.alertsEnabled !== false ? 'checked' : ''} ${wx?.enabled === false ? 'disabled' : ''}> Severe-weather alerts (US)</label>
+          <label class="row">Units <select id="wx-units" ${wx?.enabled === false ? 'disabled' : ''}><option value="f" ${wx?.units !== 'c' ? 'selected' : ''}>°F, mph</option><option value="c" ${wx?.units === 'c' ? 'selected' : ''}>°C, km/h</option></select></label>
+        </div>
       </div>
 
       <div class="card stack">
@@ -1337,6 +1430,13 @@ function renderConnections() {
     toast('Saved');
     await refresh();
   });
+  const wxSave = guard(async () => {
+    await api('POST', '/api/weather/settings', { enabled: $('#wx-on').checked, alerts: $('#wx-alerts').checked, units: $('#wx-units').value });
+    toast('Weather settings saved');
+    setTimeout(refresh, 1500); // the first reading takes a moment
+    await refresh();
+  });
+  for (const id of ['#wx-on', '#wx-alerts', '#wx-units']) $(id).onchange = wxSave;
   $('#loc-find').onclick = guard(async () => {
     const results = await api('GET', `/api/location/search?q=${encodeURIComponent($('#loc-q').value)}`);
     $('#loc-results').innerHTML = results.length
@@ -1348,6 +1448,20 @@ function renderConnections() {
       await refresh();
     })));
   });
+}
+
+function weatherBox(wx) {
+  if (!wx || !wx.enabled || !S.state.location?.lat) return '';
+  const c = wx.current;
+  const t = unitOf('temperature');
+  const now = c
+    ? `<div class="sky"><span>${SKY_ICON[c.condition] ?? ''} ${esc(c.condition)}</span><span>🌡 ${c.temperature}${t} <span class="muted">(feels ${c.feelsLike}${t})</span></span><span>↕ ${c.low}–${c.high}${t}</span><span>💧 ${c.humidity}%</span><span>💨 ${c.wind}${unitOf('wind')}${c.gusts > c.wind ? `, gusts ${c.gusts}` : ''}</span></div>`
+    : `<p class="small muted" style="margin:0">${wx.status?.lastError ? `Weather: ${esc(wx.status.lastError)}` : 'Getting the weather…'}</p>`;
+  const alerts = wx.alerts?.length
+    ? wx.alerts.map((a) => `<div class="note" style="border-color:var(--bad)">⚠️ <b>${esc(a.alert)}</b> <span class="muted small">${esc(a.severity)}${a.expires ? ` · until ${timeOf(a.expires)}` : ''}</span><br><span class="small">${esc(a.headline)}</span></div>`).join('')
+    : wx.alertsEnabled && !wx.status?.alerts && c ? '<p class="small muted" style="margin:0">No weather alerts right now.</p>' : '';
+  const why = wx.alertsEnabled && wx.status?.alerts ? `<p class="small muted" style="margin:0">Alerts: ${esc(wx.status.alerts)}</p>` : '';
+  return now + alerts + why;
 }
 
 function showServers(servers) {
@@ -1476,7 +1590,7 @@ if (saved && saved !== 'routines' && document.getElementById(`tab-${saved}`)) sh
 
 setInterval(() => api('GET', '/api/state').then((s) => {
   const waitingChanged = JSON.stringify(s.waiting) !== JSON.stringify(S.state.waiting);
-  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
+  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, mqtt: s.mqtt, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky, weather: s.weather });
   renderHeader();
   if (waitingChanged && !$('#idea')?.value) renderRoutines(); // don't wipe an idea being typed
 }).catch(() => {}), 10_000);

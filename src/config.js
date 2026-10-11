@@ -72,6 +72,7 @@ function defaults() {
     ntfy: { server: 'https://ntfy.sh', topic: '', token: '' },
     mqtt: { url: '', username: '', password: '' },
     location: { lat: null, lon: null, name: '' },
+    weather: { enabled: true, units: 'f', alerts: true },
     mode: 'home',
     modes: ['home', 'away', 'movie', 'sleep', 'guest'],
     scenes: [],
@@ -91,7 +92,7 @@ export function loadConfig() {
     const stored = JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8'));
     const base = defaults();
     current = { ...base, ...stored };
-    for (const key of ['plex', 'hue', 'govee', 'wled', 'homeassistant', 'alexa', 'ai', 'ntfy', 'mqtt', 'location']) {
+    for (const key of ['plex', 'hue', 'govee', 'wled', 'homeassistant', 'alexa', 'ai', 'ntfy', 'mqtt', 'location', 'weather']) {
       current[key] = { ...base[key], ...stored[key] };
     }
   } else {

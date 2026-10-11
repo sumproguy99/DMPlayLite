@@ -54,8 +54,9 @@ holiday color themes automatically in December/October · lights slowly brighten
 
 | Feature | How | Effort |
 |---|---|---|
-| Current/forecast weather triggers (rain starts, temp below X, wind) | **Open-Meteo** (free, no key) | 🟢 Cloud |
-| Severe weather alerts (tornado/thunderstorm warnings) | **NWS api.weather.gov** (US, free) | 🟢 Cloud |
+| ✅ Current weather triggers + conditions (rain starts, temp below X, wind) | **Open-Meteo** (free, no key) | 🟢 Cloud |
+| ✅ Severe weather alerts (tornado/thunderstorm warnings) | **NWS api.weather.gov** (US, free) | 🟢 Cloud |
+| Forecast triggers ("rain expected in the next hour") | Open-Meteo minutely/hourly forecast | 🟢 Cloud |
 | Air quality / pollen / UV | Open-Meteo air-quality API | 🟢 Cloud |
 | Local weather station | Ambient Weather / Ecowitt local push, or rtl_433 (see Radio) | 🟡 Local |
 
@@ -240,7 +241,7 @@ Ideas: person in driveway after dark → porch lights 100% for 5 min · package 
 
 **Phase 3 — Awareness**
 9. Presence: router (OpenWrt/UniFi) + iOS Shortcuts/OwnTracks helpers
-10. Weather + NWS severe alerts
+10. ✅ Weather + NWS severe alerts (forecast triggers, air quality still to do)
 11. Cameras/doorbells (Frigate/ONVIF) with snapshots
 
 **Phase 4 — Polish & voice**

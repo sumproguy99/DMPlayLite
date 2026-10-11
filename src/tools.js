@@ -3,6 +3,7 @@ import { randomId } from './util.js';
 import { hasConditions, canHold } from './engine.js';
 import { PLEX_ACTIONS } from './integrations/plex.js';
 import { ROKU_KEYS } from './integrations/roku.js';
+import { CONDITIONS, READINGS, SEVERITIES } from './integrations/weather.js';
 
 export const WORKFLOW_GUIDE = `A Playlite workflow is JSON:
 {
@@ -33,11 +34,20 @@ TRIGGERS (source → event → optional filters):
   OR "field" (JSON key, dots for nesting) with optional "value" — a field trigger fires when that field CHANGES (to "value").
   Zigbee2MQTT motion: {"source":"mqtt","event":"message","topic":"zigbee2mqtt/Hall motion","field":"occupancy","value":"true"}
   No motion for 10 min: same with "value":"false","forMin":10. Templates: {{topic}}, {{payload}}, {{json.temperature}}.
-"forMin": N on a plex, network, homeassistant, mode, mqtt or hue motion/contact trigger = only if it STAYS that way for N minutes
+- weather (uses the location from Connections; checked every 10 min) →
+  condition: the sky changes; "to": clear|cloudy|fog|rain|snow|storm (rain includes storms). Rain starts: {"source":"weather","event":"condition","to":"rain"}
+  reading: "reading": temperature|feelsLike|humidity|wind|gusts with "below" and/or "above" — fires when it CROSSES that level
+    (units from Connections, °F/mph by default). Frost: {"source":"weather","event":"reading","reading":"temperature","below":32}
+  alert | alert.ended: a US National Weather Service alert for this location starts/ends (checked every 2 min). Filters: "alert" (name contains,
+    e.g. "Tornado Warning", "Severe Thunderstorm"), "severity" (minimum: Minor|Moderate|Severe|Extreme).
+    Templates: {{alert}}, {{headline}}, {{severity}}, {{instruction}}, {{area}}. Tornado warning → lights red + urgent push:
+    trigger {"source":"weather","event":"alert","alert":"Tornado Warning"}, steps set color #ff0000 + notify priority 5 "{{headline}}".
+"forMin": N on a plex, network, homeassistant, mode, mqtt, hue motion/contact or weather condition/reading trigger = only if it STAYS that way for N minutes
   (e.g. door open 10 min: {"source":"homeassistant","event":"state","entity":"front_door","to":"on","forMin":10};
   phone gone 30 min: {"source":"network","event":"device.offline","device":"iPhone","forMin":30}). Waits reset on restart.
 CONDITIONS: timeWindow {"from":"HH:MM","to":"HH:MM"} · dark: true (after sunset/before sunrise) · light: true · fullMoon: true ·
-  presence {"device": "iPhone", "state": "home"|"away"} · mode: "movie" or ["movie","sleep"] (current house mode is one of these).
+  presence {"device": "iPhone", "state": "home"|"away"} · mode: "movie" or ["movie","sleep"] (current house mode is one of these) ·
+  weather {"condition": "rain"} (or a list) · weather {"reading": "temperature", "below": 40} (or "above") — the latest weather, see get_weather.
   Checks inside one group are AND. For OR use orConditions, e.g. "after dark OR in movie mode" →
   "conditions": {"dark": true}, "orConditions": [{"mode": "movie"}].
 STEPS:
@@ -58,6 +68,22 @@ STEPS:
 SCENES remember brightness + white temperature or color per light. "Remember how the room was and restore it after the movie" =
   movie-start workflow: capture "Before movie" FIRST, then dim; movie-stop workflow: scene "Before movie".`;
 
+const isNum = (v) => v !== '' && v != null && Number.isFinite(Number(v));
+function checkWeatherTrigger(t) {
+  if (!['condition', 'reading', 'alert', 'alert.ended'].includes(t.event)) throw new Error('weather trigger event must be condition, reading, alert or alert.ended');
+  if (t.event === 'condition' && t.to && !CONDITIONS.includes(t.to)) throw new Error(`weather "to" must be one of: ${CONDITIONS.join(', ')}`);
+  if (t.event === 'reading') {
+    t.reading ||= 'temperature';
+    if (!READINGS.includes(t.reading)) throw new Error(`weather reading must be one of: ${READINGS.join(', ')}`);
+    for (const k of ['above', 'below']) {
+      if (isNum(t[k])) t[k] = Number(t[k]);
+      else delete t[k];
+    }
+    if (t.above == null && t.below == null) throw new Error('weather reading trigger needs "below" or "above"');
+  }
+  if (t.severity && !SEVERITIES.includes(t.severity)) throw new Error(`alert severity must be one of: ${SEVERITIES.join(', ')}`);
+}
+
 export function normalizeWorkflow(w) {
   if (!w || typeof w !== 'object') throw new Error('Workflow must be an object');
   if (!w.name) throw new Error('Workflow needs a name');
@@ -68,15 +94,21 @@ export function normalizeWorkflow(w) {
   if ([w.trigger, ...(w.orTriggers ?? [])].some((t) => t.source === 'mqtt' && !String(t.topic ?? '').trim())) throw new Error('MQTT trigger needs a topic');
   for (const t of [w.trigger, ...(w.orTriggers ?? [])]) {
     if (t.source === 'hue' && t.event === 'button') t.press ||= 'short_release'; // one press = one run
+    if (t.source === 'weather') checkWeatherTrigger(t);
     if (t.forMin == null || t.forMin === '' || t.forMin === 0) {
       delete t.forMin;
       continue;
     }
     if (!(Number(t.forMin) > 0)) throw new Error('forMin must be a positive number of minutes');
-    if (!canHold(t)) throw new Error(`"for N minutes" only works with Plex, network, Home Assistant and house-mode triggers (not ${t.source} ${t.event})`);
+    if (!canHold(t)) throw new Error(`"for N minutes" only works with triggers describing a state that can end — Plex, network, Home Assistant, house mode, MQTT, Hue motion/contact, weather (not ${t.source} ${t.event})`);
     t.forMin = Number(t.forMin);
   }
   if (w.orConditions != null && !Array.isArray(w.orConditions)) throw new Error('orConditions must be a list of condition groups');
+  for (const c of [w.conditions, ...(w.orConditions ?? [])]) {
+    const cw = c?.weather;
+    if (cw?.condition && ![cw.condition].flat().every((x) => CONDITIONS.includes(x))) throw new Error(`weather condition must be one of: ${CONDITIONS.join(', ')}`);
+    if (cw?.reading && !READINGS.includes(cw.reading)) throw new Error(`weather reading must be one of: ${READINGS.join(', ')}`);
+  }
   if (w.orConditions) {
     w.orConditions = w.orConditions.filter(hasConditions);
     if (!w.orConditions.length) delete w.orConditions;
@@ -106,7 +138,7 @@ export function normalizeWorkflow(w) {
 }
 
 export function createTools(ctx) {
-  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, log } = ctx;
+  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, weather, log } = ctx;
   const findRoutine = (q) => {
     const rs = getConfig().routines;
     const s = String(q ?? '').toLowerCase();
@@ -238,6 +270,16 @@ export function createTools(ctx) {
       description: 'Set the lights back to a saved scene, optionally fading over transitionMs.',
       inputSchema: { type: 'object', properties: { scene: { type: 'string' }, transitionMs: { type: 'number' } }, required: ['scene'], additionalProperties: false },
       run: async (a) => ({ ok: true, scene: (await engine.applyScene(a.scene, a.transitionMs ?? 0)).name }),
+    },
+    {
+      name: 'get_weather',
+      description: 'Current weather at the home location (temperature, feels like, humidity, wind, condition, today\'s high/low) and any active US National Weather Service alerts.',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: async () => {
+        if (!weather) throw new Error('Weather is not available');
+        if (!weather.current && !weather.status.lastError) await weather.pollWeather().catch(() => {});
+        return weather.summary();
+      },
     },
     {
       name: 'plex_control',

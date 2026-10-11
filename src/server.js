@@ -46,7 +46,7 @@ function send(res, status, body, headers = {}) {
 }
 
 export function createServer(app) {
-  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, wled, hueSensors, alexa, assistant, tools, scheduler, auth } = app;
+  const { config, plex, hue, govee, lights, engine, log, port, discovery, ha, mqtt, wled, hueSensors, weather, alexa, assistant, tools, scheduler, auth } = app;
   const { getConfig, updateConfig } = config;
   let plexServers = []; // from the last sign-in; tokens stay server-side
 
@@ -86,6 +86,7 @@ export function createServer(app) {
       ntfy: { server: c.ntfy.server, topic: c.ntfy.topic, hasToken: Boolean(c.ntfy.token) },
       location: c.location,
       sky: { sunrise: sun?.sunrise, sunset: sun?.sunset, moon: moonName(phase), moonPhase: phase },
+      weather: weather?.summary() ?? null,
       network: { status: discovery.status, online: discovery.list().filter((d) => d.online).length, total: discovery.devices.size },
       urls: {
         ui: base.slice(0, 1),
@@ -226,6 +227,18 @@ export function createServer(app) {
       const { lat, lon, name } = await readJson(req);
       if (!Number.isFinite(+lat) || !Number.isFinite(+lon)) throw new HttpError(400, 'Latitude and longitude required');
       updateConfig((c) => (c.location = { lat: +lat, lon: +lon, name: name ?? '' }));
+      weather?.restart();
+      return { ok: true };
+    },
+    'POST /api/weather/settings': async (req) => {
+      const { enabled, units, alerts } = await readJson(req);
+      updateConfig((c) => {
+        c.weather = { ...c.weather };
+        if (enabled != null) c.weather.enabled = Boolean(enabled);
+        if (units) c.weather.units = units === 'c' ? 'c' : 'f';
+        if (alerts != null) c.weather.alerts = Boolean(alerts);
+      });
+      weather?.restart();
       return { ok: true };
     },
 
@@ -337,6 +350,7 @@ export function createServer(app) {
         c.homeassistant = { url: u, token: t };
         if (!c.location?.lat && info.latitude) c.location = { lat: info.latitude, lon: info.longitude, name: info.location };
       });
+      if (!weather?.current) weather?.restart();
       ha.restart();
       return { ok: true, info };
     },
