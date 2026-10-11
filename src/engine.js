@@ -1,5 +1,6 @@
 // Rule engine: IF (trigger) [ONLY IF (conditions)] THEN (steps).
 //
+// A workflow fires when its trigger OR any of its orTriggers matches.
 // Trigger sources & their match fields:
 //   plex           event: player.online|media.play|media.pause|media.resume|media.stop|…  player, user, mediaTypes, skipContinued
 //   network        event: device.new|device.online|device.offline                      device (name/ip/mac/kind contains)
@@ -11,6 +12,9 @@
 // Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click}
 import { Token, contains, sleep } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
+
+// A workflow has one main trigger plus optional orTriggers — any of them starts it.
+export const triggersOf = (routine) => [routine.trigger, ...(routine.orTriggers ?? [])].filter(Boolean);
 
 export function matchesTrigger(trigger, event) {
   if (!trigger || trigger.source !== event.source || trigger.event !== event.type) return false;
@@ -84,7 +88,7 @@ export class Engine {
       .join(' ');
     if (!event.quiet) this.log.event(`${event.source}: ${desc}`, event);
     for (const routine of this.getConfig().routines) {
-      if (routine.enabled && matchesTrigger(routine.trigger, event)) this.fire(routine, event);
+      if (routine.enabled && triggersOf(routine).some((t) => matchesTrigger(t, event))) this.fire(routine, event);
     }
   }
 

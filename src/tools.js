@@ -7,6 +7,7 @@ export const WORKFLOW_GUIDE = `A Playlite workflow is JSON:
   "enabled": true,
   "voiceName": "Movie Mode",            // optional: exposes it to Alexa ("Alexa, turn on Movie Mode")
   "trigger": { "source": ..., "event": ..., ...filters },
+  "orTriggers": [ { ... } ],             // optional: more triggers, same shape — any one of them starts the workflow
   "conditions": { ... },                 // optional
   "cooldownSec": 0,                      // optional: minimum seconds between runs
   "targets": ["group:living-room"],      // default lights for light steps (ids from list_lights)
@@ -34,6 +35,9 @@ export function normalizeWorkflow(w) {
   if (!w || typeof w !== 'object') throw new Error('Workflow must be an object');
   if (!w.name) throw new Error('Workflow needs a name');
   if (!w.trigger?.source || !w.trigger?.event) throw new Error('Workflow needs trigger.source and trigger.event');
+  if (w.orTriggers != null && !Array.isArray(w.orTriggers)) throw new Error('orTriggers must be a list of triggers');
+  if (w.orTriggers?.some((t) => !t?.source || !t?.event)) throw new Error('Every extra trigger needs a source and an event');
+  if (w.orTriggers && !w.orTriggers.length) delete w.orTriggers;
   if (!Array.isArray(w.steps) || !w.steps.length) throw new Error('Workflow needs at least one step');
   for (const s of w.steps) {
     if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
@@ -98,7 +102,7 @@ export function createTools(ctx) {
       name: 'list_workflows',
       description: 'List all workflows (IF this THEN that rules) with their ids, triggers and whether they are enabled.',
       inputSchema: { type: 'object', properties: {}, additionalProperties: false },
-      run: async () => getConfig().routines.map((r) => ({ id: r.id, name: r.name, enabled: r.enabled, voiceName: r.voiceName, trigger: r.trigger, steps: r.steps.length })),
+      run: async () => getConfig().routines.map((r) => ({ id: r.id, name: r.name, enabled: r.enabled, voiceName: r.voiceName, trigger: r.trigger, orTriggers: r.orTriggers, steps: r.steps.length })),
     },
     {
       name: 'get_workflow',

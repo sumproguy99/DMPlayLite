@@ -8,7 +8,7 @@ import { Auth } from '../src/auth.js';
 import { handleMcp } from '../src/mcp.js';
 import { createTools, normalizeWorkflow } from '../src/tools.js';
 import { Engine, matchesTrigger, template, ntfyRequest } from '../src/engine.js';
-import { nextFireToday } from '../src/scheduler.js';
+import { nextFireToday, Scheduler } from '../src/scheduler.js';
 import { classify, vendorFor, pickName } from '../src/discovery.js';
 import { encodeQuery, decodePacket } from '../src/dns.js';
 
@@ -176,4 +176,34 @@ test('notify: ntfy request, validation, and a routine sends it', async () => {
     globalThis.fetch = realFetch;
   }
   assert.deepEqual(sent, [{ u: 'https://ntfy.sh', body: { topic: 'den-abc', message: 'Dune is on' } }]);
+});
+
+test('or-triggers: any trigger starts the workflow, incl. scheduled ones', () => {
+  const { engine, config } = fakeCtx();
+  const fired = [];
+  engine.fire = (r, e) => fired.push(`${r.id}:${e.source}:${e.type}`);
+  config.routines = [{
+    id: 'w', name: 'Welcome', enabled: true, steps: [{ type: 'wait', ms: 0 }],
+    trigger: { source: 'network', event: 'device.online', device: 'iPhone' },
+    orTriggers: [{ source: 'webhook', event: 'home' }, { source: 'time', event: 'time.at', at: '18:00' }, { source: 'time', event: 'time.at', at: '19:00' }],
+  }];
+  engine.handle({ source: 'network', type: 'device.online', device: 'DMF-iPhone', quiet: true });
+  engine.handle({ source: 'webhook', type: 'home', quiet: true });
+  engine.handle({ source: 'webhook', type: 'away', quiet: true });
+  assert.deepEqual(fired, ['w:network:device.online', 'w:webhook:home']);
+
+  // The scheduler skips times before it was created, so use tomorrow's date.
+  const day = new Date(Date.now() + 86_400_000).toLocaleDateString('en-CA');
+  const at = (hhmm) => new Date(`${day}T${hhmm}:30`);
+  const s = new Scheduler({ getConfig: () => config, engine, log: { event() {} } });
+  fired.length = 0;
+  s.tick(at('18:00'));
+  s.tick(at('18:01')); // same trigger, same day → only once
+  s.tick(at('19:00'));
+  assert.deepEqual(fired, ['w:time:time.at', 'w:time:time.at']);
+
+  const wf = (extra) => normalizeWorkflow({ name: 'a', trigger: { source: 'x', event: 'y' }, steps: [{ type: 'wait' }], ...extra });
+  assert.throws(() => wf({ orTriggers: [{ source: 'plex' }] }), /extra trigger/);
+  assert.throws(() => wf({ orTriggers: 'nope' }), /list/);
+  assert.equal(wf({ orTriggers: [] }).orTriggers, undefined);
 });

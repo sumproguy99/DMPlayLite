@@ -235,7 +235,7 @@ function renderRoutines() {
             </div>
           </div>
           <div class="ifthen">
-            <div><span class="kw">IF</span> ${describeTrigger(r.trigger)}</div>
+            <div><span class="kw">IF</span> ${[r.trigger, ...(r.orTriggers ?? [])].map(describeTrigger).join(' <span class="kw">OR</span> ')}</div>
             ${describeConditions(r)}
             <div><span class="kw then">THEN</span>
               <ol class="steps-list">${r.steps.map((s) => `<li>${describeStep(s)}</li>`).join('')}</ol>
@@ -299,50 +299,50 @@ function targetPicker(selected, path) {
     <span>${esc(o.name)}<br><small>${esc(o.note)}</small></span></label>`).join('')}</div>`;
 }
 
-function triggerFields(tr) {
+function triggerFields(tr, base = 'trigger') {
   const ev = EVENTS[tr.source] ?? [];
   const eventSelect = ev.length
-    ? `<label class="field grow">What happens<select data-bind="trigger.event" data-rerender>${ev.map(([k, n]) => `<option value="${k}" ${tr.event === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`
+    ? `<label class="field grow">What happens<select data-bind="${base}.event" data-rerender>${ev.map(([k, n]) => `<option value="${k}" ${tr.event === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`
     : '';
   if (tr.source === 'plex') {
     const players = S.state.plex.status.players ?? [];
     return `<div class="fields">${eventSelect}
-        <label class="field grow">On player (name contains)<input type="text" data-bind="trigger.player" value="${esc(tr.player)}" placeholder="any device" list="players"></label>
+        <label class="field grow">On player (name contains)<input type="text" data-bind="${base}.player" value="${esc(tr.player)}" placeholder="any device" list="players"></label>
         <datalist id="players">${players.map((p) => `<option value="${esc(p)}">`).join('')}</datalist></div>
-      ${tr.event.startsWith('media.') ? `<div class="row small" style="margin-top:10px">${MEDIA_TYPES.map(([k, n]) => `<label class="row"><input type="checkbox" data-list="trigger.mediaTypes" value="${k}" ${tr.mediaTypes?.includes(k) ? 'checked' : ''}> ${n}</label>`).join('')}</div>` : ''}
+      ${tr.event.startsWith('media.') ? `<div class="row small" style="margin-top:10px">${MEDIA_TYPES.map(([k, n]) => `<label class="row"><input type="checkbox" data-list="${base}.mediaTypes" value="${k}" ${tr.mediaTypes?.includes(k) ? 'checked' : ''}> ${n}</label>`).join('')}</div>` : ''}
       <div class="fields" style="margin-top:10px">
-        <label class="field">Plex user contains<input type="text" data-bind="trigger.user" value="${esc(tr.user)}" placeholder="anyone"></label>
-        ${tr.event === 'media.play' ? `<label class="row small"><input type="checkbox" data-bind="trigger.skipContinued" data-type="bool" ${tr.skipContinued ? 'checked' : ''}> Ignore autoplay of the next episode</label>` : ''}
+        <label class="field">Plex user contains<input type="text" data-bind="${base}.user" value="${esc(tr.user)}" placeholder="anyone"></label>
+        ${tr.event === 'media.play' ? `<label class="row small"><input type="checkbox" data-bind="${base}.skipContinued" data-type="bool" ${tr.skipContinued ? 'checked' : ''}> Ignore autoplay of the next episode</label>` : ''}
       </div>`;
   }
   if (tr.source === 'network') {
     const names = [...new Set(S.network.map((d) => d.name).filter(Boolean))];
     return `<div class="fields">${eventSelect}
-      <label class="field grow">Which device (name, IP or type contains)<input type="text" data-bind="trigger.device" value="${esc(tr.device)}" placeholder="${tr.event === 'device.new' ? 'any new device' : 'e.g. iPhone'}" list="netdevs"></label>
+      <label class="field grow">Which device (name, IP or type contains)<input type="text" data-bind="${base}.device" value="${esc(tr.device)}" placeholder="${tr.event === 'device.new' ? 'any new device' : 'e.g. iPhone'}" list="netdevs"></label>
       <datalist id="netdevs">${names.map((n) => `<option value="${esc(n)}">`).join('')}</datalist></div>
       <p class="small muted">Phones nap on Wi-Fi, so “leaves” fires about 10 min after a device stops answering. Add a cooldown to avoid repeats.</p>`;
   }
   if (tr.source === 'homeassistant') {
     return `<div class="fields">
-      <label class="field grow">Entity (id or name contains)<input type="text" data-bind="trigger.entity" value="${esc(tr.entity)}" placeholder="binary_sensor.front_door" list="haents"></label>
+      <label class="field grow">Entity (id or name contains)<input type="text" data-bind="${base}.entity" value="${esc(tr.entity)}" placeholder="binary_sensor.front_door" list="haents"></label>
       <datalist id="haents" data-ha-list></datalist>
-      <label class="field">From<input type="text" data-bind="trigger.from" value="${esc(tr.from)}" placeholder="any"></label>
-      <label class="field">To<input type="text" data-bind="trigger.to" value="${esc(tr.to)}" placeholder="e.g. on"></label></div>
+      <label class="field">From<input type="text" data-bind="${base}.from" value="${esc(tr.from)}" placeholder="any"></label>
+      <label class="field">To<input type="text" data-bind="${base}.to" value="${esc(tr.to)}" placeholder="e.g. on"></label></div>
       ${S.state.homeassistant.status.connected ? '' : '<p class="small muted">Connect Home Assistant under Connections first.</p>'}`;
   }
   if (tr.source === 'time') {
     const sunNote = S.state.location?.lat ? '' : '<p class="small" style="color:var(--warn)">Set your location under Connections → Location for sunrise/sunset.</p>';
     return `<div class="fields">${eventSelect}
       ${tr.event === 'time.at'
-        ? `<label class="field">Time<input type="time" data-bind="trigger.at" value="${esc(tr.at ?? '18:00')}"></label>`
-        : `<label class="field">Offset (minutes, − = before)<input type="number" data-bind="trigger.offsetMin" data-type="num" value="${tr.offsetMin ?? 0}"></label>`}
+        ? `<label class="field">Time<input type="time" data-bind="${base}.at" value="${esc(tr.at ?? '18:00')}"></label>`
+        : `<label class="field">Offset (minutes, − = before)<input type="number" data-bind="${base}.offsetMin" data-type="num" value="${tr.offsetMin ?? 0}"></label>`}
       </div>
-      <div class="row small" style="margin-top:10px">${DAYS.map((d, i) => `<label class="daychip"><input type="checkbox" data-list="trigger.days" data-num value="${i}" ${!tr.days?.length || tr.days.includes(i) ? 'checked' : ''}><span>${d}</span></label>`).join('')}</div>
+      <div class="row small" style="margin-top:10px">${DAYS.map((d, i) => `<label class="daychip"><input type="checkbox" data-list="${base}.days" data-num value="${i}" ${!tr.days?.length || tr.days.includes(i) ? 'checked' : ''}><span>${d}</span></label>`).join('')}</div>
       ${tr.event === 'time.at' ? '' : sunNote}`;
   }
   // webhook
   const url = S.state.urls.hook.replace('<name>', encodeURIComponent(tr.event || 'name'));
-  return `<div class="fields"><label class="field grow">Webhook name<input type="text" data-bind="trigger.event" value="${esc(tr.event)}" placeholder="e.g. doorbell" data-rerender-blur></label></div>
+  return `<div class="fields"><label class="field grow">Webhook name<input type="text" data-bind="${base}.event" value="${esc(tr.event)}" placeholder="e.g. doorbell" data-rerender-blur></label></div>
     <p class="small muted" style="margin-bottom:4px">Call this URL (GET or POST) from Siri Shortcuts, IFTTT, Zapier, Home Assistant, a Stream Deck…</p>${copyBox(url)}`;
 }
 
@@ -444,6 +444,17 @@ function renderEditor() {
         <div class="section-label"><span class="kw">IF</span> this happens</div>
         <div class="tiles">${SOURCES.map((s) => `<button class="tile ${tr.source === s.id ? 'on' : ''}" data-source="${s.id}"><span class="tile-icon">${s.icon}</span><b>${s.name}</b><small>${s.blurb}</small></button>`).join('')}</div>
         <div style="margin-top:12px">${triggerFields(tr)}</div>
+        ${(d.orTriggers ?? []).map((t, i) => `
+          <div class="or-trigger">
+            <div class="row spread">
+              <div class="row"><span class="kw">OR</span>
+                <select data-orsource="${i}">${SOURCES.map((s) => `<option value="${s.id}" ${t.source === s.id ? 'selected' : ''}>${s.icon} ${s.name}</option>`).join('')}</select>
+              </div>
+              <button class="btn sm ghost danger" data-delor="${i}" title="Remove this trigger">✕</button>
+            </div>
+            <div style="margin-top:10px">${triggerFields(t, `orTriggers.${i}`)}</div>
+          </div>`).join('')}
+        <button class="btn sm" id="add-or" style="margin-top:10px">+ Or when…</button>
       </div>
 
       <div class="block">
@@ -479,7 +490,7 @@ function renderEditor() {
       <div class="row"><button class="btn" id="cancel-edit">Cancel</button><button class="btn" id="test-routine" title="Run the steps now without saving">Test</button><button class="btn primary" id="save-routine">Save</button></div>
     </div>`;
   wireEditor();
-  if (tr.source === 'homeassistant' || d.steps.some((s) => s.type === 'ha')) fillHaEntities();
+  if ([tr, ...(d.orTriggers ?? [])].some((t) => t.source === 'homeassistant') || d.steps.some((s) => s.type === 'ha')) fillHaEntities();
 }
 
 async function fillHaEntities() {
@@ -535,24 +546,40 @@ function wireEditor() {
     });
     if (el.hasAttribute('data-rerender-blur')) el.addEventListener('change', renderEditor);
   });
-  dlg.querySelectorAll('[data-source]').forEach((b) => (b.onclick = () => {
-    const src = b.dataset.source;
-    if (draft.trigger.source === src) return;
-    draft.trigger = { source: src, event: EVENTS[src][0]?.[0] ?? '' };
-    if (src === 'plex') draft.trigger.mediaTypes = ['movie', 'episode', 'clip'];
-    if (src === 'time') draft.trigger.at = '18:00';
+  const blankTrigger = (src) => {
+    const t = { source: src, event: EVENTS[src][0]?.[0] ?? '' };
+    if (src === 'plex') t.mediaTypes = ['movie', 'episode', 'clip'];
+    if (src === 'time') t.at = '18:00';
     if (src === 'network' && !S.network.length) refreshNetwork().then(renderEditor).catch(() => {});
+    return t;
+  };
+  dlg.querySelectorAll('[data-source]').forEach((b) => (b.onclick = () => {
+    if (draft.trigger.source === b.dataset.source) return;
+    draft.trigger = blankTrigger(b.dataset.source);
     renderEditor();
   }));
+  dlg.querySelectorAll('[data-orsource]').forEach((el) => (el.onchange = () => {
+    draft.orTriggers[+el.dataset.orsource] = blankTrigger(el.value);
+    renderEditor();
+  }));
+  dlg.querySelectorAll('[data-delor]').forEach((el) => (el.onclick = () => {
+    draft.orTriggers.splice(+el.dataset.delor, 1);
+    if (!draft.orTriggers.length) delete draft.orTriggers;
+    renderEditor();
+  }));
+  $('#add-or').onclick = () => {
+    (draft.orTriggers ??= []).push(blankTrigger(draft.trigger.source === 'time' ? 'webhook' : 'time'));
+    renderEditor();
+  };
   dlg.querySelectorAll('[data-list]').forEach((el) => {
     el.onchange = () => {
       const path = el.dataset.list;
       const val = el.hasAttribute('data-num') ? Number(el.value) : el.value;
-      const cur = getPath(draft, path) ?? (path === 'trigger.days' ? [0, 1, 2, 3, 4, 5, 6] : []);
+      const cur = getPath(draft, path) ?? (path.endsWith('.days') ? [0, 1, 2, 3, 4, 5, 6] : []);
       const set = new Set(cur);
       el.checked ? set.add(val) : set.delete(val);
       let next = [...set];
-      if (path === 'trigger.days') next = next.length === 7 ? undefined : next.sort();
+      if (path.endsWith('.days')) next = next.length === 7 ? undefined : next.sort();
       setPath(draft, path, next);
     };
   });
@@ -600,12 +627,13 @@ function wireEditor() {
   const validate = () => {
     if (!draft.name?.trim()) throw new Error('Give the workflow a name');
     if (!draft.trigger.event) throw new Error('Pick what should trigger it');
+    if (draft.orTriggers?.some((t) => !t.event)) throw new Error('Finish or remove the extra “Or when…” trigger');
     if (!draft.steps.length) throw new Error('Add at least one THEN step');
   };
   $('#test-routine').onclick = guard(async () => {
     validate();
     const routines = clone(S.state.routines);
-    const tmp = { ...clone(draft), id: draft.id ?? `test-${Date.now()}`, name: `${draft.name} (test)`, trigger: { source: 'webhook', event: `__test_${Date.now()}` } };
+    const tmp = { ...clone(draft), id: draft.id ?? `test-${Date.now()}`, name: `${draft.name} (test)`, trigger: { source: 'webhook', event: `__test_${Date.now()}` }, orTriggers: undefined };
     await api('PUT', '/api/routines', [...routines, tmp]);
     await api('POST', '/api/routines/run', { id: tmp.id }).catch(() => {});
     await api('PUT', '/api/routines', routines);

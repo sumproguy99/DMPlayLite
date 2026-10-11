@@ -1,5 +1,6 @@
 // Fires "time" workflows: at a clock time (optionally on certain weekdays) or at sunrise/sunset ± offset.
 import { sunTimes } from './solar.js';
+import { triggersOf } from './engine.js';
 
 export function nextFireToday(trigger, now, location) {
   const day = now.getDay();
@@ -43,16 +44,19 @@ export class Scheduler {
   tick(now = new Date()) {
     const dayKey = now.toLocaleDateString('en-CA');
     for (const r of this.getConfig().routines) {
-      if (!r.enabled || r.trigger?.source !== 'time') continue;
-      const at = nextFireToday(r.trigger, now, this.getConfig().location);
-      if (!at) continue;
-      const key = `${r.id}|${dayKey}`;
-      // Fire once per day, within 2 minutes after the target (and never for times before we started).
-      if (now >= at && now - at < 120_000 && at.getTime() >= this.#started - 1000 && !this.#fired.has(key)) {
-        this.#fired.add(key);
-        this.log.event(`time: ${r.trigger.event === 'time.at' ? r.trigger.at : r.trigger.event.replace('sun.', '')} → "${r.name}"`);
-        this.engine.fire(r, { source: 'time', type: r.trigger.event, at: now.toISOString() });
-      }
+      if (!r.enabled) continue;
+      triggersOf(r).forEach((t, i) => {
+        if (t.source !== 'time') return;
+        const at = nextFireToday(t, now, this.getConfig().location);
+        if (!at) return;
+        const key = `${r.id}|${i}|${dayKey}`;
+        // Fire once per day, within 2 minutes after the target (and never for times before we started).
+        if (now >= at && now - at < 120_000 && at.getTime() >= this.#started - 1000 && !this.#fired.has(key)) {
+          this.#fired.add(key);
+          this.log.event(`time: ${t.event === 'time.at' ? t.at : t.event.replace('sun.', '')} → "${r.name}"`);
+          this.engine.fire(r, { source: 'time', type: t.event, at: now.toISOString() });
+        }
+      });
     }
     if (this.#fired.size > 500) this.#fired.clear();
   }
