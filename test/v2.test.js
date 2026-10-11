@@ -310,3 +310,61 @@ test('for N minutes: fires only if the state holds, per device, cancels on chang
   assert.throws(() => normalizeWorkflow({ ...base, trigger: { source: 'time', event: 'time.at', at: '10:00', forMin: 5 } }), /only works with/);
   assert.throws(() => normalizeWorkflow({ ...base, trigger: { source: 'mode', event: 'mode.changed', forMin: -1 } }), /positive/);
 });
+
+test('scenes: save, restore in a workflow, capture step, colors, MCP', async () => {
+  const { LightController } = await import('../src/lights.js');
+  const { xyToHex, rgbToXy, hexToRgb } = await import('../src/util.js');
+  assert.equal(xyToHex(rgbToXy(hexToRgb('#ff8a3d'))), '#ff8a3d');
+
+  const bulbs = { 1: { on: true, brightness: 80, kelvin: 2700 }, 2: { on: false, brightness: 50 }, 3: { on: true, brightness: 40, color: '#ff0000' } };
+  const fake = {
+    supportsTransition: true,
+    list: async () => [],
+    getState: async (ref) => (bulbs[ref] ? { ...bulbs[ref] } : null),
+    apply: async (ref, p) => {
+      const b = (bulbs[ref] ??= {});
+      if (p.on === false || p.brightness === 0) b.on = false;
+      else if (p.on || p.brightness != null) b.on = true;
+      if (p.brightness) b.brightness = p.brightness;
+      if (p.kelvin) (b.kelvin = p.kelvin), delete b.color;
+      if (p.color) (b.color = p.color), delete b.kelvin;
+    },
+  };
+  const config = { groups: [{ id: 'den', name: 'Den', members: ['fake:1', 'fake:2', 'fake:3'] }], routines: [], scenes: [] };
+  const log = { entries: [], info() {}, warn() {}, error() {}, event() {} };
+  const lights = new LightController({ drivers: { fake }, getConfig: () => config, log });
+  const engine = new Engine({ getConfig: () => config, updateConfig: (fn) => fn(config), lights, log });
+
+  const { scene, skipped } = await engine.saveScene('Evening', ['group:den', 'fake:9']);
+  assert.deepEqual(skipped, ['fake:9']);
+  assert.deepEqual(scene.lights, {
+    'fake:1': { on: true, brightness: 80, kelvin: 2700 },
+    'fake:2': { on: false },
+    'fake:3': { on: true, brightness: 40, color: '#ff0000' },
+  });
+  // same name (any case) replaces, keeps the id
+  bulbs[1].brightness = 81;
+  assert.equal((await engine.saveScene('evening', ['fake:1'])).scene.id, scene.id);
+  assert.equal(config.scenes.length, 1);
+  await engine.saveScene('Evening', ['group:den']);
+
+  // movie: capture first, then change lights; stop: restore
+  await engine.run({ id: 'm', name: 'Movie', targets: ['group:den'], steps: [{ type: 'capture', scene: 'Before movie' }, { type: 'set', brightness: 10, kelvin: 2200 }] });
+  assert.deepEqual([bulbs[1].brightness, bulbs[2].on, bulbs[3].kelvin], [10, true, 2200]);
+  await engine.run({ id: 's', name: 'Stop', steps: [{ type: 'scene', scene: 'before MOVIE' }] });
+  assert.deepEqual(bulbs[1], { on: true, brightness: 81, kelvin: 2700 });
+  assert.equal(bulbs[2].on, false);
+  assert.deepEqual(bulbs[3], { on: true, brightness: 40, color: '#ff0000' });
+
+  await assert.rejects(engine.saveScene('', ['fake:1']), /needs a name/);
+  await assert.rejects(engine.saveScene('X', ['fake:9']), /Couldn't read/);
+  await assert.rejects(engine.applyScene('nope'), /No scene/);
+  assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'x', event: 'y' }, steps: [{ type: 'scene' }] }), /scene step needs a scene name/);
+
+  const tools = createTools({ getConfig: () => config, updateConfig: (fn) => fn(config), engine, lights, discovery: null, ha: null, log });
+  const call = (name, a) => tools.find((t) => t.name === name).run(a);
+  assert.deepEqual((await call('list_scenes', {})).map((x) => [x.name, x.lights]), [['Evening', 3], ['Before movie', 3]]);
+  bulbs[1].brightness = 5;
+  assert.deepEqual(await call('apply_scene', { scene: 'Evening' }), { ok: true, scene: 'Evening' });
+  assert.equal(bulbs[1].brightness, 81);
+});

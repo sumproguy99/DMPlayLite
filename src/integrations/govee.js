@@ -3,7 +3,7 @@
 //   control:   unicast  <device-ip>:4003
 // Govee has no native transitions, so the light controller fades in software.
 import dgram from 'node:dgram';
-import { clamp, hexToRgb } from '../util.js';
+import { clamp, hexToRgb, rgbToHex } from '../util.js';
 
 const MULTICAST = '239.255.255.250';
 const SCAN_PORT = 4001;
@@ -158,7 +158,7 @@ export class GoveeDriver {
     return {
       on: s.onOff === 1,
       brightness: s.brightness,
-      ...(s.colorTemInKelvin ? { kelvin: s.colorTemInKelvin } : {}),
+      ...(s.colorTemInKelvin ? { kelvin: s.colorTemInKelvin } : s.color ? { color: rgbToHex(s.color) } : {}),
     };
   }
 }

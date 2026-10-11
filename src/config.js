@@ -72,6 +72,7 @@ function defaults() {
     location: { lat: null, lon: null, name: '' },
     mode: 'home',
     modes: ['home', 'away', 'movie', 'sleep', 'guest'],
+    scenes: [],
     groups: [
       { id: 'living-room', name: 'Living Room', members: [] },
       { id: 'basement', name: 'Basement', members: [] },

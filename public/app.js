@@ -44,6 +44,8 @@ const STEP_TYPES = [
   ['ha', '🏠', 'Home Assistant action'],
   ['notify', '📲', 'Phone alert'],
   ['mode', '🎭', 'Set house mode'],
+  ['scene', '🎬', 'Scene'],
+  ['capture', '📸', 'Save scene'],
 ];
 const modeOptions = (selected, anyLabel) => `${anyLabel ? `<option value="">${anyLabel}</option>` : ''}${S.state.modes.map((m) => `<option value="${esc(m)}" ${selected === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}`;
 const NTFY_PRIORITIES = [[1, 'Min'], [2, 'Low'], [3, 'Normal'], [4, 'High'], [5, 'Urgent']];
@@ -175,6 +177,8 @@ function describeStep(step) {
   if (step.type === 'http') return `🌐 ${esc(step.method ?? 'POST')} ${esc(step.url)}`;
   if (step.type === 'ha') return `🏠 ${esc(step.service)} ${esc(step.data?.entity_id ?? '')}`;
   if (step.type === 'mode') return `🎭 house mode → <b>${esc(step.mode)}</b>`;
+  if (step.type === 'scene') return `🎬 scene <b>${esc(step.scene)}</b>${step.transitionMs ? ` over ${sec(step.transitionMs)}s` : ''}`;
+  if (step.type === 'capture') return `📸 save lights as scene <b>${esc(step.scene)}</b>${t}`;
   if (step.type === 'notify') return `📲 “${esc(step.title ? `${step.title}: ${step.message}` : step.message)}”${step.topic ? ` → ${esc(step.topic)}` : ''}${step.priority >= 4 ? ' (high priority)' : ''}`;
   if (step.type === 'pulse') return `✨ pulse ${step.levels.join('→')}% ×${step.times} (${sec(step.stepMs)}s/step)${step.restore ? ', then restore' : ''}${t}`;
   const parts = [];
@@ -433,6 +437,15 @@ function stepEditor(step, i) {
       </div>`;
   } else if (step.type === 'mode') {
     body = `<div class="fields"><label class="field grow">Switch the house mode to<select data-bind="${p}.mode">${modeOptions(step.mode)}</select></label></div>`;
+  } else if (step.type === 'scene') {
+    body = `<div class="fields">
+        <label class="field grow">Scene<input type="text" data-bind="${p}.scene" value="${esc(step.scene)}" placeholder="scene name" list="scenenames"></label>
+        <label class="field">Fade (seconds)<input type="number" min="0" step="0.5" data-bind="${p}.transitionMs" data-type="sec" value="${sec(step.transitionMs)}"></label>
+      </div>
+      <p class="muted small" style="margin:0">Puts the lights back exactly as the scene saved them. Save scenes on the Lights tab or with a “📸 Save scene” step.</p>`;
+  } else if (step.type === 'capture') {
+    body = `<div class="fields"><label class="field grow">Save the lights as scene<input type="text" data-bind="${p}.scene" value="${esc(step.scene)}" placeholder="e.g. Before movie" list="scenenames"></label></div>
+      <p class="muted small" style="margin:0">Remembers how the lights look right now (replacing a scene with the same name). Put it first, then restore it later with a “🎬 Scene” step — e.g. when the movie stops.</p>`;
   } else if (step.type === 'notify') {
     const topicSet = Boolean(S.state.ntfy?.topic);
     body = `<div class="fields">
@@ -448,7 +461,7 @@ function stepEditor(step, i) {
         </div></details>
       <p class="muted small" style="margin:0">Use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} to insert details from the trigger.${topicSet ? '' : ' <span style="color:var(--warn)">Set up Phone alerts under Connections first.</span>'}</p>`;
   }
-  const custom = (step.type === 'set' || step.type === 'pulse') && step.targets?.length;
+  const custom = ['set', 'pulse', 'capture'].includes(step.type) && step.targets?.length;
   return `
     <div class="step">
       <div class="row spread">
@@ -462,7 +475,7 @@ function stepEditor(step, i) {
         </div>
       </div>
       ${body}
-      ${step.type === 'set' || step.type === 'pulse' ? `
+      ${['set', 'pulse', 'capture'].includes(step.type) ? `
         <label class="row small"><input type="checkbox" data-customtargets="${i}" ${custom ? 'checked' : ''}> Use different lights for this step</label>
         ${custom ? targetPicker(step.targets, `${p}.targets`) : ''}` : ''}
     </div>`;
@@ -495,7 +508,7 @@ function renderEditor() {
   const d = draft;
   const tr = d.trigger;
   const c = d.conditions ?? {};
-  const needsLights = d.steps.some((s) => s.type === 'set' || s.type === 'pulse');
+  const needsLights = d.steps.some((s) => ['set', 'pulse', 'capture'].includes(s.type));
   $('#editor').innerHTML = `
     <div class="dlg-head"><h2>${draftIndex == null ? 'New workflow' : 'Edit workflow'}</h2>
       <label class="row small">On <span class="switch"><input type="checkbox" data-bind="enabled" data-type="bool" ${d.enabled ? 'checked' : ''}><span></span></span></label></div>
@@ -543,6 +556,7 @@ function renderEditor() {
         <div class="section-label"><span class="kw then">THEN</span> do this</div>
         ${needsLights ? `<div class="small muted" style="margin-bottom:6px">Lights</div>${targetPicker(d.targets, 'targets')}<div style="height:12px"></div>` : ''}
         <div class="stack">${d.steps.map(stepEditor).join('')}</div>
+        <datalist id="scenenames">${(S.state.scenes ?? []).map((x) => `<option value="${esc(x.name)}">`).join('')}</datalist>
         <div class="row" style="margin-top:10px">${STEP_TYPES.map(([k, ic, n]) => `<button class="btn sm" data-addstep="${k}">${ic} ${n}</button>`).join('')}</div>
       </div>
     </div>
@@ -744,6 +758,8 @@ function newStep(type) {
   if (type === 'ha') return { type, service: 'switch.turn_on', data: { entity_id: '' } };
   if (type === 'notify') return { type, message: '', priority: 3 };
   if (type === 'mode') return { type, mode: S.state.modes.find((m) => m !== S.state.mode) ?? S.state.modes[0] };
+  if (type === 'scene') return { type, scene: S.state.scenes?.[0]?.name ?? '', transitionMs: 2000 };
+  if (type === 'capture') return { type, scene: '' };
   return { type: 'set', brightness: 50, transitionMs: 3000 };
 }
 
@@ -852,6 +868,27 @@ function renderLights() {
             : '<p class="muted small">Connect Hue, Govee or Home Assistant first.</p>'}
         </div>`).join('')}
     </div>
+    <div class="row spread" style="margin:28px 0 14px">
+      <div><h2>Scenes</h2><p class="sub" style="margin:0">Save how the lights look right now, then bring it back with a tap, a “🎬 Scene” workflow step, or Siri.</p></div>
+      <button class="btn primary" id="add-scene">+ Save current lights</button>
+    </div>
+    <div class="card stack" id="scene-form" hidden>
+      <label class="field">Scene name<input type="text" id="scene-name" placeholder="e.g. Reading, Dinner, Movie night"></label>
+      <div class="small muted">Which lights</div>
+      ${targetPicker([], 'sceneTargets')}
+      <div class="row"><button class="btn primary" id="scene-save">Save scene</button><button class="btn" id="scene-cancel">Cancel</button></div>
+    </div>
+    <div class="stack">
+      ${(S.state.scenes ?? []).map((x) => `
+        <div class="card row spread">
+          <span>🎬 <b>${esc(x.name)}</b><br><small class="muted">${x.lights.length} light${x.lights.length === 1 ? '' : 's'} · ${esc(x.lights.map(targetName).join(', '))} · saved ${esc(new Date(x.savedAt).toLocaleString())}</small></span>
+          <span class="row">
+            <button class="btn sm primary" data-sapply="${esc(x.id)}">Apply</button>
+            <button class="btn sm" data-sresave="${esc(x.id)}" title="Save the lights' current look into this scene">Update</button>
+            <button class="btn sm ghost danger" data-sdel="${esc(x.id)}">Delete</button>
+          </span>
+        </div>`).join('') || '<p class="muted small">No scenes yet.</p>'}
+    </div>
     <h2 style="margin-top:28px">All lights</h2>
     <p class="sub">“Identify” blinks a light so you can tell which is which.</p>
     <div class="checks">${S.lights.map(lightRow).join('') || '<p class="muted">No lights found yet.</p>'}</div>`;
@@ -882,6 +919,39 @@ function renderLights() {
     S.groups.splice(+b.dataset.gdel, 1);
     await saveGroups();
     renderLights();
+  })));
+  const reloadScenes = async () => {
+    S.state.scenes = (await api('GET', '/api/state')).scenes;
+    renderLights();
+  };
+  const saveScene = async (name, targets) => {
+    const res = await api('POST', '/api/scenes', { name, targets });
+    toast(res.skipped.length ? `Saved — couldn't read ${res.skipped.map(targetName).join(', ')}` : `Saved scene “${name}”`, res.skipped.length > 0);
+    await reloadScenes();
+  };
+  $('#add-scene').onclick = () => {
+    $('#scene-form').hidden = false;
+    $('#scene-name').focus();
+  };
+  $('#scene-cancel').onclick = () => ($('#scene-form').hidden = true);
+  $('#scene-save').onclick = guard(async () => {
+    const name = $('#scene-name').value.trim();
+    const targets = [...el.querySelectorAll('#scene-form [data-list]:checked')].map((c) => c.value);
+    if (!name) throw new Error('Give the scene a name');
+    if (!targets.length) throw new Error('Pick at least one light');
+    if ((S.state.scenes ?? []).some((x) => x.name.toLowerCase() === name.toLowerCase()) && !confirm(`Replace the scene “${name}”?`)) return;
+    await busy($('#scene-save'), 'Saving…', () => saveScene(name, targets));
+  });
+  el.querySelectorAll('[data-sapply]').forEach((b) => (b.onclick = guard(() => busy(b, '…', () => api('POST', '/api/scenes/apply', { id: b.dataset.sapply, transitionMs: 1000 })))));
+  el.querySelectorAll('[data-sresave]').forEach((b) => (b.onclick = guard(async () => {
+    const x = S.state.scenes.find((y) => y.id === b.dataset.sresave);
+    if (confirm(`Replace “${x.name}” with how its lights look right now?`)) await saveScene(x.name, x.lights);
+  })));
+  el.querySelectorAll('[data-sdel]').forEach((b) => (b.onclick = guard(async () => {
+    const x = S.state.scenes.find((y) => y.id === b.dataset.sdel);
+    if (!confirm(`Delete scene “${x.name}”? Workflow steps using it will be skipped.`)) return;
+    await api('POST', '/api/scenes/delete', { id: x.id });
+    await reloadScenes();
   })));
   el.querySelectorAll('[data-identify]').forEach((b) => (b.onclick = guard(async () => {
     await busy(b, '…', () => api('POST', '/api/lights/identify', { target: b.dataset.identify }));
@@ -979,6 +1049,8 @@ function renderConnections() {
         ${copyBox(urls.run.replace('<workflow>', encodeURIComponent(S.state.routines.find((r) => r.voiceName)?.voiceName ?? 'Movie Mode')))}
         <div class="small"><b>Switch the house mode</b> — e.g. “Hey Siri, movie mode” (change <code>movie</code> to any mode):</div>
         ${copyBox(urls.mode.replace('<mode>', 'movie'))}
+        <div class="small"><b>Turn on a scene</b> — e.g. “Hey Siri, reading lights” (add <code>&amp;fade=3</code> to fade over 3 s):</div>
+        ${copyBox(urls.scene.replace('<scene>', encodeURIComponent(S.state.scenes?.[0]?.name ?? 'Reading')))}
         <div class="small"><b>Ask Playlite anything</b> — add <i>Dictate Text</i> first, put it after <code>q=</code>, then <i>Speak Text</i> the result:</div>
         ${copyBox(urls.ask)}
         <p class="small muted" style="margin:0">Also great as iPhone Personal Automations: arrive home, leave, alarm stopped, Focus on, NFC tag tapped.</p>
@@ -1247,7 +1319,7 @@ if (saved && saved !== 'routines' && document.getElementById(`tab-${saved}`)) sh
 
 setInterval(() => api('GET', '/api/state').then((s) => {
   const waitingChanged = JSON.stringify(s.waiting) !== JSON.stringify(S.state.waiting);
-  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
+  Object.assign(S.state, { mode: s.mode, modes: s.modes, waiting: s.waiting, scenes: s.scenes, plex: s.plex, hue: s.hue, govee: s.govee, homeassistant: s.homeassistant, alexa: s.alexa, ai: s.ai, network: s.network, sky: s.sky });
   renderHeader();
   if (waitingChanged && !$('#idea')?.value) renderRoutines(); // don't wipe an idea being typed
 }).catch(() => {}), 10_000);

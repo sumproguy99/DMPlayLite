@@ -38,7 +38,11 @@ STEPS:
 - {"type":"http","method":"POST","url":"https://…","body":{…}}   (strings may use {{player}}, {{title}}, {{device}}, {{entity}}, {{to}} from the event)
 - {"type":"ha","service":"switch.turn_on","data":{"entity_id":"switch.fan"}}
 - {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy; optional "topic" overrides the default set under Connections; priority 1-5, 5 = urgent)
-- {"type":"mode","mode":"movie"}   (switch the house mode; this can trigger other workflows)`;
+- {"type":"mode","mode":"movie"}   (switch the house mode; this can trigger other workflows)
+- {"type":"capture","scene":"Before movie","targets":[optional override]}   (save how the lights look right now as a scene; same name = replace)
+- {"type":"scene","scene":"Before movie","transitionMs":3000}   (put the lights back the way that scene saved them; see list_scenes)
+SCENES remember brightness + white temperature or color per light. "Remember how the room was and restore it after the movie" =
+  movie-start workflow: capture "Before movie" FIRST, then dim; movie-stop workflow: scene "Before movie".`;
 
 export function normalizeWorkflow(w) {
   if (!w || typeof w !== 'object') throw new Error('Workflow must be an object');
@@ -63,7 +67,7 @@ export function normalizeWorkflow(w) {
   }
   if (!Array.isArray(w.steps) || !w.steps.length) throw new Error('Workflow needs at least one step');
   for (const s of w.steps) {
-    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
+    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode', 'scene', 'capture'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
     if (s.type === 'pulse') {
       s.levels ??= [100, 70, 100];
       s.times ??= 3;
@@ -72,6 +76,7 @@ export function normalizeWorkflow(w) {
     if (s.type === 'http' && !/^https?:\/\//.test(s.url ?? '')) throw new Error('http step needs a full http(s) URL');
     if (s.type === 'ha' && !/^\w+\.\w+$/.test(s.service ?? '')) throw new Error('ha step needs a service like "light.turn_on"');
     if (s.type === 'mode' && !String(s.mode ?? '').trim()) throw new Error('mode step needs a mode, e.g. "movie"');
+    if ((s.type === 'scene' || s.type === 'capture') && !String(s.scene ?? '').trim()) throw new Error(`${s.type} step needs a scene name`);
     if (s.type === 'notify') {
       if (!String(s.message ?? '').trim()) throw new Error('notify step needs a message');
       if (s.priority != null && s.priority !== '' && !(Number.isInteger(+s.priority) && +s.priority >= 1 && +s.priority <= 5)) throw new Error('notify priority must be 1-5');
@@ -193,6 +198,27 @@ export function createTools(ctx) {
       description: 'Switch the house mode. Workflows triggered by mode changes run, and workflows with a mode condition start/stop applying.',
       inputSchema: { type: 'object', properties: { mode: { type: 'string' } }, required: ['mode'], additionalProperties: false },
       run: async (a) => ({ ok: true, changed: engine.setMode(a.mode, 'AI'), mode: engine.mode }),
+    },
+    {
+      name: 'list_scenes',
+      description: 'Saved light scenes (name and how many lights each covers).',
+      inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+      run: async () => (getConfig().scenes ?? []).map((s) => ({ id: s.id, name: s.name, lights: Object.keys(s.lights).length, savedAt: s.savedAt })),
+    },
+    {
+      name: 'save_scene',
+      description: 'Save how the given lights look right now as a named scene (same name replaces it). targets are light/group ids from list_lights.',
+      inputSchema: { type: 'object', properties: { name: { type: 'string' }, targets: { type: 'array', items: { type: 'string' } } }, required: ['name', 'targets'], additionalProperties: false },
+      run: async (a) => {
+        const { scene, skipped } = await engine.saveScene(a.name, a.targets);
+        return { ok: true, scene: scene.name, lights: Object.keys(scene.lights).length, unreachable: skipped };
+      },
+    },
+    {
+      name: 'apply_scene',
+      description: 'Set the lights back to a saved scene, optionally fading over transitionMs.',
+      inputSchema: { type: 'object', properties: { scene: { type: 'string' }, transitionMs: { type: 'number' } }, required: ['scene'], additionalProperties: false },
+      run: async (a) => ({ ok: true, scene: (await engine.applyScene(a.scene, a.transitionMs ?? 0)).name }),
     },
     {
       name: 'list_network_devices',

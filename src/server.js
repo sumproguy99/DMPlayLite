@@ -67,6 +67,7 @@ export function createServer(app) {
       mode: engine.mode,
       modes: c.modes,
       waiting: engine.waiting,
+      scenes: (c.scenes ?? []).map((s) => ({ id: s.id, name: s.name, lights: Object.keys(s.lights), savedAt: s.savedAt })),
       plex: { url: c.plex.url, hasToken: Boolean(c.plex.token), pollSeconds: c.plex.pollSeconds, status: plex.status },
       hue: { bridgeIp: c.hue.bridgeIp, paired: hue.ready, candidates: discovery.list().filter((d) => d.kind === 'hue-bridge').map((d) => d.ip) },
       govee: { multicastInterface: c.govee.multicastInterface, devices: govee.list() },
@@ -88,6 +89,7 @@ export function createServer(app) {
         hook: `${base[0]}/hooks/<name>?key=${key}`,
         run: `${base[0]}/run/<workflow>?key=${key}`,
         mode: `${base[0]}/mode/<mode>?key=${key}`,
+        scene: `${base[0]}/scene/<scene>?key=${key}`,
         ask: `${base[0]}/ask?key=${key}&q=`,
         mcp: `${base[0]}/mcp?key=${key}`,
       },
@@ -162,6 +164,26 @@ export function createServer(app) {
         throw new HttpError(400, err.message);
       }
       return { ok: true, mode: engine.mode };
+    },
+    'POST /api/scenes': async (req) => {
+      const { name, targets } = await readJson(req);
+      try {
+        const { scene, skipped } = await engine.saveScene(name, targets);
+        return { ok: true, id: scene.id, skipped };
+      } catch (err) {
+        throw new HttpError(400, err.message);
+      }
+    },
+    'POST /api/scenes/apply': async (req) => {
+      const { id, transitionMs } = await readJson(req);
+      if (!engine.findScene(id)) throw new HttpError(404, 'No such scene');
+      await engine.applyScene(id, transitionMs ?? 0);
+      return { ok: true };
+    },
+    'POST /api/scenes/delete': async (req) => {
+      const { id } = await readJson(req);
+      updateConfig((c) => (c.scenes = (c.scenes ?? []).filter((s) => s.id !== id)));
+      return { ok: true };
     },
     'POST /api/simulate': async (req) => {
       const event = await readJson(req);
@@ -387,6 +409,14 @@ export function createServer(app) {
       }
       return res.writeHead(200).end(`House mode is now ${engine.mode}`);
     }
+    if (p.startsWith('/scene/')) {
+      // Siri: "Hey Siri, reading lights" → GET /scene/reading
+      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+      const scene = engine.findScene(decodeURIComponent(p.slice(7)));
+      if (!scene) return res.writeHead(404).end(`No scene called ${decodeURIComponent(p.slice(7))}`);
+      engine.applyScene(scene.id, Number(url.searchParams.get('fade') ?? 0) * 1000).catch((err) => log.error(`Scene: ${err.message}`));
+      return res.writeHead(200).end(`${scene.name} is on`);
+    }
     // Generic: /hooks/<name>  → trigger { source: 'webhook', event: '<name>' }
     const name = decodeURIComponent(p.slice('/hooks/'.length));
     const body = req.method === 'POST' ? await readJson(req).catch(() => ({})) : {};
@@ -438,7 +468,7 @@ export function createServer(app) {
     const url = new URL(req.url, 'http://local');
     const p = url.pathname;
     try {
-      if (p === '/webhooks/plex' || p.startsWith('/hooks/') || p.startsWith('/run/') || p.startsWith('/mode/') || p === '/ask' || p === '/mcp') return await handleKeyed(req, res, url);
+      if (p === '/webhooks/plex' || p.startsWith('/hooks/') || p.startsWith('/run/') || p.startsWith('/mode/') || p.startsWith('/scene/') || p === '/ask' || p === '/mcp') return await handleKeyed(req, res, url);
       if (['/api/auth/status', '/api/auth/login', '/api/auth/setup'].includes(p)) return await handleAuthPublic(req, res, url);
       if (OPEN_FILES.has(p)) return serveStatic(res, p);
 

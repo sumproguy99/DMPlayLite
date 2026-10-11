@@ -11,7 +11,7 @@
 //   mode           event: mode.changed  to, from (house mode names)
 // Conditions: timeWindow {from,to} · dark · fullMoon · presence {device, state: home|away} · mode (name or list) · cooldownSec
 // Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data} · notify {message, title, topic, priority, tags, click} · mode {mode}
-import { Token, contains, sleep } from './util.js';
+import { Token, contains, randomId, sleep } from './util.js';
 import { isDark, isFullMoon } from './solar.js';
 
 // A workflow has one main trigger plus optional orTriggers — any of them starts it.
@@ -79,6 +79,9 @@ export function ntfyRequest(step, settings = {}, event = {}) {
 }
 
 const LIGHT_STEPS = new Set(['set', 'pulse']);
+
+// What a scene stores per light: off, or on with brightness and a white temperature or a color.
+const sceneState = (s) => (s.on === false ? { on: false } : { on: true, brightness: s.brightness ?? 100, ...(s.color ? { color: s.color } : s.kelvin ? { kelvin: s.kelvin } : {}) });
 
 export class Engine {
   #lastRun = new Map(); // routine id -> timestamp
@@ -209,13 +212,15 @@ export class Engine {
 
   async run(routine, event = { source: 'manual', type: 'run' }) {
     this.#lastRun.set(routine.id, Date.now());
-    const stepTargets = (step) => this.lights.resolve(step.targets?.length ? step.targets : routine.targets);
-    const lightSteps = routine.steps.filter((s) => LIGHT_STEPS.has(s.type));
+    const stepTargets = (step) =>
+      step.type === 'scene' ? Object.keys(this.findScene(step.scene)?.lights ?? {}) : this.lights.resolve(step.targets?.length ? step.targets : routine.targets);
+    const lightSteps = routine.steps.filter((s) => LIGHT_STEPS.has(s.type) || s.type === 'scene');
     const all = [...new Set(lightSteps.flatMap(stepTargets))];
 
-    if (lightSteps.length && !all.length) {
+    const plain = lightSteps.filter((s) => s.type !== 'scene');
+    if (plain.length && !plain.flatMap(stepTargets).length) {
       this.log.warn(`"${routine.name}" matched but has no lights — add lights to its group/targets`);
-      if (lightSteps.length === routine.steps.filter((s) => s.type !== 'wait').length) return;
+      if (plain.length === routine.steps.filter((s) => s.type !== 'wait').length) return;
     }
 
     const tokens = this.lights.claim(all);
@@ -234,6 +239,18 @@ export class Engine {
         else if (step.type === 'ha') await this.#ha(step, event);
         else if (step.type === 'notify') await this.#notify(step, event);
         else if (step.type === 'mode') this.#modeStep(step, routine);
+        else if (step.type === 'capture') await this.saveScene(step.scene, stepTargets(step)).then(({ scene }) => this.log.info(`📸 Saved scene "${scene.name}"`), (err) => this.log.error(`Save scene: ${err.message}`));
+        else if (step.type === 'scene') {
+          const scene = this.findScene(step.scene);
+          if (!scene) {
+            this.log.warn(`No scene called "${step.scene}" — save it first`);
+            continue;
+          }
+          // a scene saved earlier in this same run may cover lights we haven't claimed yet
+          for (const [t, token] of this.lights.claim(Object.keys(scene.lights).filter((t) => !tokens.has(t)))) tokens.set(t, token);
+          const live = Object.keys(scene.lights).filter((t) => !tokens.get(t).cancelled);
+          await Promise.all(live.map((t) => this.#sceneLight(scene, t, step.transitionMs ?? 0, tokens.get(t))));
+        }
         else if (LIGHT_STEPS.has(step.type)) {
           const live = stepTargets(step).filter((t) => !tokens.get(t)?.cancelled);
           await Promise.all(live.map((t) => this.#lightStep(step, t, tokens.get(t))));
@@ -243,6 +260,53 @@ export class Engine {
       this.log.info(`■ ${routine.name} done in ${((Date.now() - started) / 1000).toFixed(1)}s${note}`);
     } finally {
       this.lights.release(tokens);
+    }
+  }
+
+  // Scenes: saved light states, by name. Saving again under the same name replaces it.
+  findScene(q) {
+    const list = this.getConfig().scenes ?? [];
+    const s = String(q ?? '').trim().toLowerCase();
+    return list.find((x) => x.id === q) ?? list.find((x) => x.name.toLowerCase() === s);
+  }
+
+  async saveScene(name, targets) {
+    name = String(name ?? '').trim();
+    if (!name) throw new Error('The scene needs a name');
+    const ids = this.lights.resolve(targets);
+    if (!ids.length) throw new Error('Pick at least one light for the scene');
+    const read = await Promise.all(ids.map(async (t) => [t, await this.lights.getState(t).catch(() => null)]));
+    const lights = Object.fromEntries(read.filter(([, st]) => st).map(([t, st]) => [t, sceneState(st)]));
+    if (!Object.keys(lights).length) throw new Error("Couldn't read any of those lights — are they reachable?");
+    let scene;
+    this.updateConfig((c) => {
+      c.scenes ??= [];
+      scene = c.scenes.find((x) => x.name.toLowerCase() === name.toLowerCase());
+      if (!scene) c.scenes.push((scene = { id: randomId(4), name }));
+      Object.assign(scene, { lights, savedAt: new Date().toISOString() });
+    });
+    return { scene, skipped: ids.filter((t) => !lights[t]) };
+  }
+
+  // Apply a scene outside a workflow (UI, Siri, AI). Takes over its lights like a workflow would.
+  async applyScene(q, transitionMs = 0) {
+    const scene = this.findScene(q);
+    if (!scene) throw new Error(`No scene called "${q}"`);
+    const tokens = this.lights.claim(Object.keys(scene.lights));
+    try {
+      await Promise.all([...tokens].map(([t, token]) => this.#sceneLight(scene, t, transitionMs, token)));
+    } finally {
+      this.lights.release(tokens);
+    }
+    return scene;
+  }
+
+  async #sceneLight(scene, target, transitionMs, token) {
+    const { on, brightness, kelvin, color } = scene.lights[target];
+    try {
+      await this.lights.set(target, on === false ? { on: false } : { on: true, brightness, kelvin, color }, transitionMs, token);
+    } catch (err) {
+      this.log.error(`${target}: ${err.message}`);
     }
   }
 

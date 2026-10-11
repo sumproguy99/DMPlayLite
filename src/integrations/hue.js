@@ -1,6 +1,6 @@
 // Philips Hue bridge driver (local REST API v1, plain HTTP on the LAN).
 // The bridge performs transitions natively, so fades are perfectly smooth.
-import { clamp, fetchJson, hexToRgb, kelvinToMired, miredToKelvin, rgbToXy, sleep } from '../util.js';
+import { clamp, fetchJson, hexToRgb, kelvinToMired, miredToKelvin, rgbToXy, sleep, xyToHex } from '../util.js';
 
 export class HueDriver {
   supportsTransition = true;
@@ -95,6 +95,7 @@ export class HueDriver {
       on,
       brightness: Math.round((s.bri ?? 254) / 2.54),
       ...(s.colormode === 'ct' && s.ct ? { kelvin: miredToKelvin(s.ct) } : {}),
+      ...((s.colormode === 'xy' || s.colormode === 'hs') && s.xy ? { color: xyToHex(s.xy) } : {}),
     };
   }
 }

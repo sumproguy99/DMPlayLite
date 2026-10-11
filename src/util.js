@@ -74,6 +74,25 @@ export function rgbToXy({ r, g, b }) {
   return [+(X / sum).toFixed(4), +(Y / sum).toFixed(4)];
 }
 
+export const rgbToHex = ({ r, g, b }) => `#${[r, g, b].map((c) => clamp(Math.round(c), 0, 255).toString(16).padStart(2, '0')).join('')}`;
+
+// CIE xy -> sRGB hex at full brightness (inverse of rgbToXy), for reading a Hue light's color back.
+export function xyToHex([x, y]) {
+  if (!y) return '#ffffff';
+  const X = x / y, Y = 1, Z = (1 - x - y) / y;
+  const rgb = [
+    X * 1.656492 - Y * 0.354851 - Z * 0.255038,
+    -X * 0.707196 + Y * 1.655397 + Z * 0.036152,
+    X * 0.051713 - Y * 0.121364 + Z * 1.01153,
+  ].map((c) => Math.max(0, c));
+  const max = Math.max(...rgb) || 1;
+  const [r, g, b] = rgb.map((c) => {
+    c /= max;
+    return 255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+  });
+  return rgbToHex({ r, g, b });
+}
+
 // Expands pulse levels into a flat brightness sequence, dropping
 // back-to-back duplicates so [100,70,100] x2 => 100,70,100,70,100.
 export function pulseSequence(levels, times) {

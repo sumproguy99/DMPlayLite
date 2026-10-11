@@ -39,6 +39,7 @@ Environment: `PORT` (8787), `PLAYLITE_DATA` (config folder, `./data`), `ANTHROPI
 | **Siri** | Shortcuts → `/run/<workflow>` to run, `/ask?q=` to ask the AI anything (spoken reply) |
 | **AI agents** | MCP server at `/mcp` (Claude Code: `claude mcp add --transport http playlite "<url>"`) with tools for lights, workflows, network, Home Assistant |
 | **House modes** | home / away / movie / sleep / guest — switch from the header, a workflow step, Siri (`/mode/<name>`) or the AI; "mode changes" trigger and "only if mode is…" condition |
+| **Scenes** | Save how lights look (brightness + white or color) under a name on the Lights tab, then restore with a tap, a "🎬 Scene" step, Siri (`/scene/<name>`) or the AI. A "📸 Save scene" step captures the room mid-workflow — e.g. remember it when a movie starts, put it back when it stops |
 | **Phone alerts** | "📲 Phone alert" step pushes to the ntfy app (iOS/Android) — title, priority, emoji tags, tap-to-open link, `{{variables}}`; public ntfy.sh or self-hosted with an access token |
 | **Web** | Inbound `/hooks/<name>` (IFTTT, Zapier, Tasker, HA `rest_command`); outbound "Call a URL" step with `{{variables}}` |
 
