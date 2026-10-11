@@ -1,0 +1,19 @@
+{
+  "name": "playlite",
+  "version": "0.1.0",
+  "description": "Local-network IFTTT-style automations: Plex playback -> Philips Hue / Govee lights",
+  "type": "module",
+  "main": "src/index.js",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js",
+    "test": "node --test \"test/**/*.test.js\""
+  },
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.132.1"
+  }
+}

@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Playlite</title>
+  <link rel="icon" href="/favicon.svg" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true"><svg viewBox="0 0 32 32"><circle cx="16" cy="16" r="14"/><path d="M13 10l9 6-9 6z"/></svg></span>
+      <span>Playlite</span>
+    </div>
+    <div id="pills" class="pills"></div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button data-tab="routines" class="active">Workflows</button>
+    <button data-tab="network">Network</button>
+    <button data-tab="lights">Lights &amp; Groups</button>
+    <button data-tab="connections">Connections</button>
+    <button data-tab="activity">Activity</button>
+  </nav>
+
+  <main>
+    <section id="tab-routines" class="tab active"></section>
+    <section id="tab-network" class="tab"></section>
+    <section id="tab-lights" class="tab"></section>
+    <section id="tab-connections" class="tab"></section>
+    <section id="tab-activity" class="tab"></section>
+  </main>
+
+  <dialog id="editor"></dialog>
+  <div id="toast" role="status"></div>
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

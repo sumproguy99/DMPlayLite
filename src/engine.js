@@ -1,0 +1,182 @@
+// Rule engine: IF (trigger) [ONLY IF (conditions)] THEN (steps).
+//
+// Trigger sources & their match fields:
+//   plex           event: player.online|media.play|media.pause|media.resume|media.stop|…  player, user, mediaTypes, skipContinued
+//   network        event: device.new|device.online|device.offline                      device (name/ip/mac/kind contains)
+//   homeassistant  event: state                                                          entity (id/name contains), to, from
+//   time           event: time.at (at "HH:MM", days [0-6]) | sun.sunrise | sun.sunset (offsetMin)   — fired by the scheduler
+//   webhook        event: <name>   (/hooks/<name>, Siri Shortcuts, IFTTT, Zapier, HA rest_command…)
+//   voice          event: alexa    device (exposed name contains)
+// Conditions: timeWindow {from,to} · dark · fullMoon · presence {device, state: home|away} · cooldownSec
+// Steps: set · pulse · wait · http {method,url,body,headers} · ha {service, data}
+import { Token, contains, sleep } from './util.js';
+import { isDark, isFullMoon } from './solar.js';
+
+export function matchesTrigger(trigger, event) {
+  if (!trigger || trigger.source !== event.source || trigger.event !== event.type) return false;
+  if (trigger.player && !contains(event.player, trigger.player)) return false;
+  if (trigger.user && !contains(event.user, trigger.user)) return false;
+  if (trigger.mediaTypes?.length && event.mediaType && !trigger.mediaTypes.includes(event.mediaType)) return false;
+  if (trigger.skipContinued && event.continued) return false;
+  if (trigger.device && !contains([event.device, event.ip, event.mac, event.kind, event.label].join(' '), trigger.device)) return false;
+  if (trigger.entity && !contains(`${event.entity} ${event.name}`, trigger.entity)) return false;
+  if (trigger.to && String(event.to).toLowerCase() !== String(trigger.to).toLowerCase()) return false;
+  if (trigger.from && String(event.from).toLowerCase() !== String(trigger.from).toLowerCase()) return false;
+  return true;
+}
+
+const toMinutes = (hhmm) => {
+  const [h, m] = String(hhmm).split(':').map(Number);
+  return h * 60 + (m || 0);
+};
+
+export function withinTimeWindow(window, now = new Date()) {
+  if (!window?.from || !window?.to) return true;
+  const cur = now.getHours() * 60 + now.getMinutes();
+  const from = toMinutes(window.from);
+  const to = toMinutes(window.to);
+  return from <= to ? cur >= from && cur < to : cur >= from || cur < to; // handles overnight windows
+}
+
+// "{{player}} started {{title}}" -> values from the triggering event.
+export function template(value, event) {
+  if (typeof value === 'string') return value.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, k) => String(k.split('.').reduce((o, p) => o?.[p], event) ?? ''));
+  if (Array.isArray(value)) return value.map((v) => template(v, event));
+  if (value && typeof value === 'object') return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, template(v, event)]));
+  return value;
+}
+
+const LIGHT_STEPS = new Set(['set', 'pulse']);
+
+export class Engine {
+  #lastRun = new Map(); // routine id -> timestamp
+
+  constructor({ getConfig, lights, log, discovery = null, ha = null }) {
+    this.getConfig = getConfig;
+    this.lights = lights;
+    this.log = log;
+    this.discovery = discovery;
+    this.ha = ha;
+  }
+
+  handle(event) {
+    const desc = [event.type, event.player && `on "${event.player}"`, event.device && `"${event.device}"`, event.entity && `${event.entity}: ${event.from} → ${event.to}`, event.title && `(${event.title})`]
+      .filter(Boolean)
+      .join(' ');
+    if (!event.quiet) this.log.event(`${event.source}: ${desc}`, event);
+    for (const routine of this.getConfig().routines) {
+      if (routine.enabled && matchesTrigger(routine.trigger, event)) this.fire(routine, event);
+    }
+  }
+
+  // Check conditions + cooldown, then run. Used by handle() and by the scheduler.
+  fire(routine, event) {
+    const why = this.blockedBy(routine);
+    if (why) {
+      this.log.info(`Skipped "${routine.name}" (${why})`);
+      return false;
+    }
+    const last = this.#lastRun.get(routine.id) ?? 0;
+    if (routine.cooldownSec && Date.now() - last < routine.cooldownSec * 1000) {
+      this.log.info(`Skipped "${routine.name}" (cooldown)`);
+      return false;
+    }
+    this.run(routine, event);
+    return true;
+  }
+
+  // Returns a reason string if a condition fails, else null.
+  blockedBy(routine, now = new Date()) {
+    const c = routine.conditions ?? {};
+    if (!withinTimeWindow(c.timeWindow, now)) return `outside ${c.timeWindow.from}–${c.timeWindow.to}`;
+    const loc = this.getConfig().location;
+    if ((c.dark || c.light) && !loc?.lat) return 'set your location to use day/night conditions';
+    if (c.dark && !isDark(now, loc.lat, loc.lon)) return 'it is daytime';
+    if (c.light && isDark(now, loc.lat, loc.lon)) return 'it is dark';
+    if (c.fullMoon && !isFullMoon(now)) return 'not a full moon';
+    if (c.presence?.device && this.discovery) {
+      const home = this.discovery.find(c.presence.device).some((d) => d.online);
+      if (c.presence.state === 'home' && !home) return `${c.presence.device} is away`;
+      if (c.presence.state === 'away' && home) return `${c.presence.device} is home`;
+    }
+    return null;
+  }
+
+  async run(routine, event = { source: 'manual', type: 'run' }) {
+    this.#lastRun.set(routine.id, Date.now());
+    const stepTargets = (step) => this.lights.resolve(step.targets?.length ? step.targets : routine.targets);
+    const lightSteps = routine.steps.filter((s) => LIGHT_STEPS.has(s.type));
+    const all = [...new Set(lightSteps.flatMap(stepTargets))];
+
+    if (lightSteps.length && !all.length) {
+      this.log.warn(`"${routine.name}" matched but has no lights — add lights to its group/targets`);
+      if (lightSteps.length === routine.steps.filter((s) => s.type !== 'wait').length) return;
+    }
+
+    const tokens = this.lights.claim(all);
+    // The run stops once every light it controls was taken over by another workflow.
+    const runToken = new Token();
+    for (const t of tokens.values()) t.onCancel(() => [...tokens.values()].every((x) => x.cancelled) && runToken.cancel());
+
+    const n = all.length;
+    this.log.info(`▶ ${routine.name}${n ? `  [${n} light${n > 1 ? 's' : ''}]` : ''}`, { routine: routine.id, trigger: event.type });
+    const started = Date.now();
+    try {
+      for (const step of routine.steps) {
+        if (runToken.cancelled) break;
+        if (step.type === 'wait') await sleep(step.ms ?? 0, runToken);
+        else if (step.type === 'http') await this.#http(step, event);
+        else if (step.type === 'ha') await this.#ha(step, event);
+        else if (LIGHT_STEPS.has(step.type)) {
+          const live = stepTargets(step).filter((t) => !tokens.get(t)?.cancelled);
+          await Promise.all(live.map((t) => this.#lightStep(step, t, tokens.get(t))));
+        } else this.log.warn(`Unknown step type "${step.type}"`);
+      }
+      const note = runToken.cancelled ? ' (taken over by another workflow)' : '';
+      this.log.info(`■ ${routine.name} done in ${((Date.now() - started) / 1000).toFixed(1)}s${note}`);
+    } finally {
+      this.lights.release(tokens);
+    }
+  }
+
+  async #lightStep(step, target, token) {
+    try {
+      if (step.type === 'set') {
+        const { brightness, kelvin, color, on } = step;
+        await this.lights.set(target, { brightness, kelvin, color, on }, step.transitionMs ?? 0, token);
+      } else {
+        await this.lights.pulse(target, step, token);
+      }
+    } catch (err) {
+      this.log.error(`${target}: ${err.message}`);
+    }
+  }
+
+  async #http(step, event) {
+    const url = template(step.url, event);
+    const method = (step.method ?? 'POST').toUpperCase();
+    try {
+      let body = step.body == null || method === 'GET' ? undefined : template(step.body, event);
+      const headers = { ...template(step.headers ?? {}, event) };
+      if (body && typeof body === 'object') {
+        body = JSON.stringify(body);
+        headers['Content-Type'] ??= 'application/json';
+      }
+      const res = await fetch(url, { method, headers, body, signal: AbortSignal.timeout(10_000) });
+      if (!res.ok) this.log.warn(`Call ${method} ${url} → HTTP ${res.status}`);
+      else this.log.info(`Called ${method} ${new URL(url).host} → ${res.status}`);
+    } catch (err) {
+      this.log.error(`Call ${method} ${url} failed: ${err.message}`);
+    }
+  }
+
+  async #ha(step, event) {
+    try {
+      if (!this.ha) throw new Error('Home Assistant is not set up');
+      await this.ha.callService(step.service, template(step.data ?? {}, event));
+      this.log.info(`Home Assistant: ${step.service}`);
+    } catch (err) {
+      this.log.error(`Home Assistant ${step.service}: ${err.message}`);
+    }
+  }
+}
