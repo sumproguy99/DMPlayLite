@@ -1,6 +1,8 @@
 // Tools that AI agents can use — shared by the MCP server (/mcp) and the built-in Claude assistant.
 import { randomId } from './util.js';
 import { hasConditions, canHold } from './engine.js';
+import { PLEX_ACTIONS } from './integrations/plex.js';
+import { ROKU_KEYS } from './integrations/roku.js';
 
 export const WORKFLOW_GUIDE = `A Playlite workflow is JSON:
 {
@@ -46,6 +48,10 @@ STEPS:
 - {"type":"ha","service":"switch.turn_on","data":{"entity_id":"switch.fan"}}
 - {"type":"notify","message":"{{title}} started","title":"Movie time","priority":3,"tags":"movie_camera","click":"https://…"}  (phone push via ntfy; optional "topic" overrides the default set under Connections; priority 1-5, 5 = urgent)
 - {"type":"mode","mode":"movie"}   (switch the house mode; this can trigger other workflows)
+- {"type":"plex","action":"pause","player":"Living Room"}   (actions: pause, play, toggle, stop, next, previous, forward, back;
+  leave "player" out to control the Plex player that triggered the workflow, or else the one that's playing. E.g. doorbell → pause the movie)
+- {"type":"roku","device":"Bedroom Roku","key":"Play"} or {"type":"roku","device":"…","app":"plex"}   (Roku remote buttons: Play (= play/pause), Home,
+  Back, Select, Rev, Fwd, InstantReplay, VolumeUp, VolumeDown, VolumeMute, PowerOff, PowerOn; apps: plex, netflix, youtube, disney+, hulu, prime video, max, spotify)
 - {"type":"mqtt","topic":"zigbee2mqtt/Lamp/set","payload":{"state":"ON"},"retain":false}   (publish; payload may be text or JSON, {{variables}} work)
 - {"type":"capture","scene":"Before movie","targets":[optional override]}   (save how the lights look right now as a scene; same name = replace)
 - {"type":"scene","scene":"Before movie","transitionMs":3000}   (put the lights back the way that scene saved them; see list_scenes)
@@ -77,7 +83,7 @@ export function normalizeWorkflow(w) {
   }
   if (!Array.isArray(w.steps) || !w.steps.length) throw new Error('Workflow needs at least one step');
   for (const s of w.steps) {
-    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode', 'scene', 'capture', 'mqtt'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
+    if (!['set', 'pulse', 'wait', 'http', 'ha', 'notify', 'mode', 'scene', 'capture', 'mqtt', 'plex', 'roku'].includes(s.type)) throw new Error(`Unknown step type "${s.type}"`);
     if (s.type === 'pulse') {
       s.levels ??= [100, 70, 100];
       s.times ??= 3;
@@ -86,6 +92,8 @@ export function normalizeWorkflow(w) {
     if (s.type === 'http' && !/^https?:\/\//.test(s.url ?? '')) throw new Error('http step needs a full http(s) URL');
     if (s.type === 'ha' && !/^\w+\.\w+$/.test(s.service ?? '')) throw new Error('ha step needs a service like "light.turn_on"');
     if (s.type === 'mode' && !String(s.mode ?? '').trim()) throw new Error('mode step needs a mode, e.g. "movie"');
+    if (s.type === 'plex' && !['toggle', ...Object.keys(PLEX_ACTIONS)].includes(s.action)) throw new Error(`plex step action must be one of: toggle, ${Object.keys(PLEX_ACTIONS).join(', ')}`);
+    if (s.type === 'roku' && !s.app && !ROKU_KEYS.some(([k]) => k === s.key)) throw new Error(`roku step needs "key" (${ROKU_KEYS.map(([k]) => k).join(', ')}) or "app"`);
     if (s.type === 'mqtt' && (!String(s.topic ?? '').trim() || /[+#]/.test(s.topic))) throw new Error('mqtt step needs a plain topic (no + or # wildcards)');
     if ((s.type === 'scene' || s.type === 'capture') && !String(s.scene ?? '').trim()) throw new Error(`${s.type} step needs a scene name`);
     if (s.type === 'notify') {
@@ -98,7 +106,7 @@ export function normalizeWorkflow(w) {
 }
 
 export function createTools(ctx) {
-  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, log } = ctx;
+  const { getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, log } = ctx;
   const findRoutine = (q) => {
     const rs = getConfig().routines;
     const s = String(q ?? '').toLowerCase();
@@ -230,6 +238,26 @@ export function createTools(ctx) {
       description: 'Set the lights back to a saved scene, optionally fading over transitionMs.',
       inputSchema: { type: 'object', properties: { scene: { type: 'string' }, transitionMs: { type: 'number' } }, required: ['scene'], additionalProperties: false },
       run: async (a) => ({ ok: true, scene: (await engine.applyScene(a.scene, a.transitionMs ?? 0)).name }),
+    },
+    {
+      name: 'plex_control',
+      description: 'Control Plex playback on a player: pause, play, toggle, stop, next, previous, forward (~30 s), back (~10 s). Leave player out to control whatever is playing.',
+      inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['toggle', ...Object.keys(PLEX_ACTIONS)] }, player: { type: 'string' } }, required: ['action'], additionalProperties: false },
+      run: async (a) => {
+        if (!plex) throw new Error('Plex is not set up');
+        return { ok: true, ...(await plex.control(a.action, a.player ? { player: a.player } : {})) };
+      },
+    },
+    {
+      name: 'roku',
+      description: 'Press a Roku remote button (key) or open a channel (app) on a Roku found on the network. Omit device if there is only one Roku.',
+      inputSchema: { type: 'object', properties: { device: { type: 'string' }, key: { type: 'string', enum: ROKU_KEYS.map(([k]) => k) }, app: { type: 'string' } }, additionalProperties: false },
+      run: async (a) => {
+        if (!roku) throw new Error('Roku control is not available');
+        if (a.app) await roku.launch(a.device, a.app);
+        else await roku.keypress(a.device, a.key ?? 'Play');
+        return { ok: true, devices: roku.devices().map((d) => d.name) };
+      },
     },
     {
       name: 'list_hue_sensors',

@@ -12,9 +12,22 @@ import { fetchJson, redact } from '../util.js';
 
 const PRODUCT = 'Playlite';
 
+// Remote-control commands (Plex "companion" API), relayed by the server to the player.
+export const PLEX_ACTIONS = {
+  pause: 'pause',
+  play: 'play',
+  stop: 'stop',
+  next: 'skipNext',
+  previous: 'skipPrevious',
+  forward: 'stepForward', // ~30 s
+  back: 'stepBack', // ~10 s
+};
+
 export class PlexIntegration extends EventEmitter {
   status = { connected: false, socket: 'off', lastError: null, lastPoll: null, sessions: 0, players: [] };
   #sessions = null; // sessionKey -> snapshot
+  #clients = []; // from the server's /clients: players that accept remote control on the LAN
+  #commandId = 1;
   #online = null; // player id -> name
   #recent = new Map(); // dedupe key -> ts
   #lastStop = new Map(); // player id -> ts
@@ -113,8 +126,8 @@ export class PlexIntegration extends EventEmitter {
 
   // ---------- sessions -> play/pause/resume/stop ----------
 
-  async refreshSessions() {
-    if (this.#stopped) return;
+  async refreshSessions({ force = false } = {}) {
+    if (this.#stopped && !force) return;
     let data;
     try {
       data = await fetchJson(new URL('/status/sessions', this.cfg.url), { headers: this.headers() });
@@ -175,7 +188,8 @@ export class PlexIntegration extends EventEmitter {
       fetchJson('https://clients.plex.tv/api/v2/resources?includeHttps=1', { headers: this.headers(), timeoutMs: 8000 }),
     ]);
     if (local.status === 'fulfilled') {
-      for (const c of local.value?.MediaContainer?.Server ?? []) online.set(c.machineIdentifier, c.name);
+      this.#clients = local.value?.MediaContainer?.Server ?? [];
+      for (const c of this.#clients) online.set(c.machineIdentifier, c.name);
     }
     if (cloud.status === 'fulfilled') {
       for (const r of cloud.value ?? []) {
@@ -192,6 +206,61 @@ export class PlexIntegration extends EventEmitter {
     if (!prev) return;
     for (const [id, name] of online) if (!prev.has(id)) this.#emit({ type: 'player.online', player: name, playerId: id });
     for (const [id, name] of prev) if (!online.has(id)) this.#emit({ type: 'player.offline', player: name, playerId: id });
+  }
+
+  // ---------- remote control ----------
+
+  // Which player a command goes to: playerId (from a Plex trigger) wins, then a name, then "the one that's playing".
+  #pickPlayer({ playerId, player } = {}) {
+    const sessions = [...(this.#sessions?.values() ?? [])].filter((s) => s.playerId);
+    const q = String(player ?? '').trim().toLowerCase();
+    const named = (name) => String(name ?? '').toLowerCase().includes(q);
+    if (playerId) {
+      const s = sessions.find((x) => x.playerId === playerId);
+      const c = this.#clients.find((x) => x.machineIdentifier === playerId);
+      return { id: playerId, name: s?.player ?? c?.name ?? player ?? playerId, session: s, client: c };
+    }
+    if (q) {
+      const s = sessions.find((x) => named(x.player));
+      const c = this.#clients.find((x) => x.machineIdentifier === s?.playerId) ?? this.#clients.find((x) => named(x.name));
+      if (!s && !c) throw new Error(`No Plex player called "${player}" is online${this.status.players.length ? ` (online: ${this.status.players.join(', ')})` : ''}`);
+      return { id: s?.playerId ?? c.machineIdentifier, name: s?.player ?? c.name, session: s, client: c };
+    }
+    const active = sessions.filter((x) => x.state === 'playing' || x.state === 'paused');
+    if (active.length === 1) {
+      const s = active[0];
+      return { id: s.playerId, name: s.player, session: s, client: this.#clients.find((x) => x.machineIdentifier === s.playerId) };
+    }
+    throw new Error(active.length ? `${active.length} players are active (${active.map((x) => x.player).join(', ')}) — say which one` : 'Nothing is playing on Plex');
+  }
+
+  // action: pause | play | toggle | stop | next | previous | forward | back
+  async control(action, target = {}) {
+    if (!this.cfg.url || !this.cfg.token) throw new Error('Plex is not connected');
+    // fresh view of what's playing and which players accept commands
+    await Promise.all([
+      this.refreshSessions({ force: true }).catch(() => {}),
+      fetchJson(new URL('/clients', this.cfg.url), { headers: this.headers() }).then((d) => (this.#clients = d?.MediaContainer?.Server ?? []), () => {}),
+    ]);
+    const p = this.#pickPlayer(target);
+    let command = action === 'toggle' ? (p.session?.state === 'playing' ? 'pause' : 'play') : action;
+    command = PLEX_ACTIONS[command];
+    if (!command) throw new Error(`Unknown Plex action "${action}" — use ${['toggle', ...Object.keys(PLEX_ACTIONS)].join(', ')}`);
+    const type = p.session?.mediaType === 'track' ? 'music' : p.session?.mediaType === 'photo' ? 'photo' : 'video';
+    const query = `type=${type}&commandID=${this.#commandId++}`;
+    const headers = { ...this.headers(), 'X-Plex-Target-Client-Identifier': p.id };
+    const attempts = [new URL(`/player/playback/${command}?${query}`, this.cfg.url)];
+    if (p.client?.address && p.client?.port) attempts.push(`http://${p.client.address}:${p.client.port}/player/playback/${command}?${query}`);
+    let lastErr;
+    for (const url of attempts) {
+      try {
+        await fetchJson(url, { headers, timeoutMs: 5000 });
+        return { player: p.name, command };
+      } catch (err) {
+        lastErr = err;
+      }
+    }
+    throw new Error(`${p.name} didn't accept "${action}" — some Plex apps (newer mobile/desktop apps, many TVs) don't allow remote control. ${redact(lastErr.message).slice(0, 120)}`);
   }
 
   // ---------- shared ----------

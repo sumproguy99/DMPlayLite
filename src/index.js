@@ -15,6 +15,7 @@ import { PlexIntegration } from './integrations/plex.js';
 import { HomeAssistant } from './integrations/homeassistant.js';
 import { AlexaBridge } from './integrations/alexa.js';
 import { Mqtt } from './integrations/mqtt.js';
+import { Roku } from './integrations/roku.js';
 import { createServer } from './server.js';
 import { lanAddresses } from './net.js';
 
@@ -30,11 +31,12 @@ const ha = new HomeAssistant(getConfig, log);
 const lights = new LightController({ drivers: { hue, govee, ha, wled }, getConfig, log });
 const discovery = new Discovery({ dataDir: config.DATA_DIR, log });
 const mqtt = new Mqtt(getConfig, log);
-const engine = new Engine({ getConfig, updateConfig, lights, log, discovery, ha, mqtt });
 const plex = new PlexIntegration(getConfig, log);
+const roku = new Roku({ discovery, log });
+const engine = new Engine({ getConfig, updateConfig, lights, log, discovery, ha, mqtt, plex, roku });
 const scheduler = new Scheduler({ getConfig, engine, log });
 const alexa = new AlexaBridge({ getConfig, updateConfig, engine, lights, log });
-const tools = createTools({ getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, log });
+const tools = createTools({ getConfig, updateConfig, engine, lights, discovery, ha, mqtt, hueSensors, plex, roku, log });
 const assistant = new Assistant({ getConfig, tools, log });
 const auth = new Auth(config.DATA_DIR);
 

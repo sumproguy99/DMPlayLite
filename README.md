@@ -31,7 +31,8 @@ Environment: `PORT` (8787), `PLAYLITE_DATA` (config folder, `./data`), `ANTHROPI
 | **Login** | Accounts with scrypt-hashed passwords, 30-day sessions, add family members under 👤 |
 | **Workflows** | IF/THEN builder with service tiles and "Or when…" extra triggers (any one starts it) and "Or only if…" condition groups (checks in a group must all pass; any group passing is enough), and "…stays that way for N minutes" on Plex / network / Home Assistant / mode triggers (door open 10 min, phone gone 30 min), *or* type the idea in plain English and AI drafts it for review |
 | **Network** | Always-on discovery (mDNS/Bonjour, SSDP/UPnP, ARP, subnet sweep every 10 min). Names & classifies phones, cameras, TVs, speakers, hubs; handles Wi-Fi extenders that share one MAC. Triggers: *device joins / leaves / new device* |
-| **Plex** | Play / pause / resume / stop / app opened — no Plex Pass needed (webhooks optional) |
+| **Plex** | Play / pause / resume / stop / app opened — no Plex Pass needed (webhooks optional). "▶️ Plex playback" step pauses / resumes / stops / skips on a player (default: the one that triggered it or is playing) — e.g. doorbell → pause the movie |
+| **Roku** | "📺 Roku remote" step: any remote button (play/pause, home, volume, power on Roku TVs) or open Plex / Netflix / YouTube… over the local ECP API; Rokus found by network discovery |
 | **Lights** | Hue (native fades), Govee LAN (software fades), WLED strips (native fades; found automatically or added by IP), Home Assistant lights; mixed groups; new workflows take over lights mid-fade |
 | **Hue sensors** | Hue motion sensors, dimmers / smart buttons / tap switches and contact sensors as triggers, live from the bridge's v2 event stream (pick button 1-4 and short / long press / hold). Motion clear and contact work with "for N minutes" |
 | **Home Assistant** | Two-way: any entity change is a trigger, any service is an action, HA lights become Playlite lights |
@@ -59,7 +60,7 @@ groups and workflows you've given a voice name.
 | `src/scheduler.js`, `src/solar.js` | time/sun triggers, sun & moon math |
 | `src/auth.js` | accounts & sessions |
 | `src/tools.js`, `src/mcp.js`, `src/agent.js` | AI tools, MCP server, Claude assistant |
-| `src/integrations/` | plex, hue, huesensors, govee, wled, homeassistant, alexa, mqtt |
+| `src/integrations/` | plex, hue, huesensors, govee, wled, homeassistant, alexa, mqtt, roku |
 | `public/` | UI (plain HTML/JS) |
 | `INTEGRATIONS.md` | research: smart-home platforms, top HA integrations, brands |
 | `ROADMAP.md` | what's next |

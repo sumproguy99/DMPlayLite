@@ -224,7 +224,7 @@ Ideas: person in driveway after dark → porch lights 100% for 5 min · package 
 
 ## Suggested build order
 
-**Done so far:** login · IF/THEN builder + AI drafting · always-on network discovery · Home Assistant bridge · Alexa (local) · Siri Shortcuts · MCP for AI agents · sun/moon/schedule triggers · webhooks in & out · ntfy phone alerts · OR triggers · house modes · AND/OR condition groups · "for N minutes" · scenes · MQTT · WLED · Hue sensors/buttons.
+**Done so far:** login · IF/THEN builder + AI drafting · always-on network discovery · Home Assistant bridge · Alexa (local) · Siri Shortcuts · MCP for AI agents · sun/moon/schedule triggers · webhooks in & out · ntfy phone alerts · OR triggers · house modes · AND/OR condition groups · "for N minutes" · scenes · MQTT · WLED · Hue sensors/buttons · Plex playback control · Roku.
 
 **Phase 1 — Platform** (makes everything else cheap)
 1. Plugin API + capability model; move Plex/Hue/Govee into plugins
@@ -236,7 +236,7 @@ Ideas: person in driveway after dark → porch lights 100% for 5 min · package 
 5. ✅ **MQTT** (unlocks Zigbee2MQTT, Frigate, rtl_433, OwnTracks, Tasmota, ESPHome)
 6. ✅ **Home Assistant bridge**
 7. ✅ **WLED** + Hue v2 sensors/buttons
-8. Plex control actions (pause on doorbell) + Roku/Jellyfin
+8. ✅ Plex control actions (pause on doorbell) + ✅ Roku · Jellyfin still to do
 
 **Phase 3 — Awareness**
 9. Presence: router (OpenWrt/UniFi) + iOS Shortcuts/OwnTracks helpers

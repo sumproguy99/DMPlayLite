@@ -16,6 +16,8 @@ import { Mqtt, topicMatches, parsePackets, publishPacket, decodePublish } from '
 import { startBroker } from './mini-broker.js';
 import { WledDriver } from '../src/integrations/wled.js';
 import { HueSensors } from '../src/integrations/huesensors.js';
+import { PlexIntegration } from '../src/integrations/plex.js';
+import { Roku } from '../src/integrations/roku.js';
 import http from 'node:http';
 
 test('sunrise/sunset are plausible (Nashville, June 21)', () => {
@@ -556,4 +558,92 @@ test('hue sensors: v2 event stream → motion / button / contact events', async 
   sensors.restart();
   for (let i = 0; i < 50 && !sensors.status.lastError; i++) await sleep(20);
   assert.match(sensors.status.lastError, /pair it again/);
+});
+
+test('plex control: picks the player, relays via the server, falls back to the player, Roku keys', async (t) => {
+  const sent = [];
+  let sessions = [{ sessionKey: '1', type: 'movie', title: 'Alien', Player: { title: 'Living Room TV', machineIdentifier: 'lr', state: 'playing' } }];
+  let relayWorks = true;
+  const direct = await listen((req, res) => {
+    sent.push(`direct ${req.url.split('?')[0]}`);
+    res.end('{}');
+  });
+  t.after(() => direct.close());
+  const server = await listen((req, res) => {
+    const url = new URL(req.url, 'http://x');
+    if (req.headers['x-plex-token'] !== 'tok') return res.writeHead(401).end();
+    if (url.pathname === '/status/sessions') return res.end(JSON.stringify({ MediaContainer: { Metadata: sessions } }));
+    if (url.pathname === '/clients') return res.end(JSON.stringify({ MediaContainer: { Server: [
+      { name: 'Living Room TV', machineIdentifier: 'lr', address: '127.0.0.1', port: direct.address().port },
+      { name: 'Bedroom Shield', machineIdentifier: 'bd' },
+    ] } }));
+    if (url.pathname.startsWith('/player/playback/')) {
+      sent.push(`relay ${url.pathname} ${req.headers['x-plex-target-client-identifier']} ${url.searchParams.get('type')}`);
+      return relayWorks ? res.end('{}') : res.writeHead(404).end('no');
+    }
+    res.writeHead(404).end();
+  });
+  t.after(() => server.close());
+  const config = { plex: { url: `http://127.0.0.1:${server.address().port}`, token: 'tok', clientId: 'c1' } };
+  const plex = new PlexIntegration(() => config, { info() {}, warn() {}, error() {} });
+
+  assert.deepEqual(await plex.control('pause'), { player: 'Living Room TV', command: 'pause' }); // the one that's playing
+  assert.deepEqual(await plex.control('toggle', { player: 'living' }), { player: 'Living Room TV', command: 'pause' }); // playing → pause
+  sessions[0].Player.state = 'paused';
+  assert.equal((await plex.control('toggle')).command, 'play');
+  await plex.control('forward', { player: 'Bedroom' }); // online but idle player, by name
+  await plex.control('next', { playerId: 'lr' }); // from a Plex trigger
+  relayWorks = false;
+  await plex.control('stop'); // relay refuses → sent straight to the player
+  assert.deepEqual(sent, [
+    'relay /player/playback/pause lr video',
+    'relay /player/playback/pause lr video',
+    'relay /player/playback/play lr video',
+    'relay /player/playback/stepForward bd video',
+    'relay /player/playback/skipNext lr video',
+    'relay /player/playback/stop lr video',
+    'direct /player/playback/stop',
+  ]);
+  await assert.rejects(plex.control('pause', { player: 'Bedroom' }), /didn't accept/); // relay down, no direct address
+  await assert.rejects(plex.control('pause', { player: 'Garage' }), /No Plex player called "Garage"/);
+  await assert.rejects(plex.control('dance'), /Unknown Plex action/);
+  sessions = [];
+  await assert.rejects(plex.control('pause'), /Nothing is playing/);
+  sessions = [
+    { sessionKey: '1', type: 'movie', Player: { title: 'A', machineIdentifier: 'a', state: 'playing' } },
+    { sessionKey: '2', type: 'track', Player: { title: 'B', machineIdentifier: 'b', state: 'playing' } },
+  ];
+  await assert.rejects(plex.control('pause'), /2 players are active \(A, B\)/);
+
+  // Roku ECP
+  const keys = [];
+  let refuse = false;
+  const rokuSrv = await listen((req, res) => {
+    keys.push(`${req.method} ${req.url}`);
+    res.writeHead(refuse ? 403 : 200).end();
+  });
+  t.after(() => rokuSrv.close());
+  const port = rokuSrv.address().port;
+  const roku = new Roku({ discovery: { list: () => [{ kind: 'roku', name: 'Living Room Roku', ip: '127.0.0.1', online: true }, { kind: 'tv', name: 'TV', ip: '1.2.3.4' }] }, log: {}, port });
+  await roku.keypress('living', 'Play');
+  await roku.keypress('', 'Home'); // only one Roku → no name needed
+  await roku.launch(`127.0.0.1:${port}`, 'Plex');
+  assert.deepEqual(keys, ['POST /keypress/Play', 'POST /keypress/Home', 'POST /launch/13535']);
+  refuse = true;
+  await assert.rejects(roku.keypress('living', 'Play'), /Control by mobile apps/);
+  await assert.rejects(roku.keypress('living', 'Dance'), /Unknown Roku button/);
+  await assert.rejects(roku.launch('living', 'myspace'), /Unknown Roku app/);
+  await assert.rejects(roku.keypress('kitchen', 'Play'), /No Roku called "kitchen"/);
+
+  // workflow steps: blank player = the Plex player from the trigger
+  const log = { entries: [], info() {}, warn() {}, error: (m) => errors.push(m), event() {} };
+  const errors = [];
+  sent.length = 0;
+  relayWorks = true;
+  const engine = new Engine({ getConfig: () => ({ routines: [], groups: [] }), lights: { resolve: () => [], claim: () => new Map(), release() {} }, log, plex, roku });
+  await engine.run({ id: 'x', name: 'Doorbell', steps: [{ type: 'plex', action: 'pause' }, { type: 'roku', key: 'Play' }] }, { source: 'plex', type: 'media.play', playerId: 'b', player: 'B' });
+  assert.deepEqual(sent, ['relay /player/playback/pause b music']);
+  assert.match(errors.join(), /Roku: the Roku refused/);
+  assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'webhook', event: 'x' }, steps: [{ type: 'plex', action: 'dance' }] }), /plex step action/);
+  assert.throws(() => normalizeWorkflow({ name: 'a', trigger: { source: 'webhook', event: 'x' }, steps: [{ type: 'roku' }] }), /roku step needs/);
 });

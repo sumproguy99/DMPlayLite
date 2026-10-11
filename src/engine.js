@@ -109,7 +109,7 @@ export class Engine {
   #modeChanges = []; // timestamps, to stop workflows flipping the mode back and forth forever
   #holds = new Map(); // routine|trigger|subject -> { timer, trigger, subject, name } for "for N minutes" triggers
 
-  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null }) {
+  constructor({ getConfig, updateConfig = (fn) => fn(getConfig()), lights, log, discovery = null, ha = null, mqtt = null, plex = null, roku = null }) {
     this.getConfig = getConfig;
     this.updateConfig = updateConfig;
     this.lights = lights;
@@ -117,6 +117,8 @@ export class Engine {
     this.discovery = discovery;
     this.ha = ha;
     this.mqtt = mqtt;
+    this.plex = plex;
+    this.roku = roku;
   }
 
   // House mode: one current mode (home, away, movie…). Changing it fires { source: 'mode', type: 'mode.changed', from, to }.
@@ -266,6 +268,8 @@ export class Engine {
         else if (step.type === 'notify') await this.#notify(step, event);
         else if (step.type === 'mode') this.#modeStep(step, routine);
         else if (step.type === 'mqtt') this.#mqttStep(step, event);
+        else if (step.type === 'plex') await this.#plexStep(step, event);
+        else if (step.type === 'roku') await this.#rokuStep(step, event);
         else if (step.type === 'capture') await this.saveScene(step.scene, stepTargets(step)).then(({ scene }) => this.log.info(`📸 Saved scene "${scene.name}"`), (err) => this.log.error(`Save scene: ${err.message}`));
         else if (step.type === 'scene') {
           const scene = this.findScene(step.scene);
@@ -391,6 +395,31 @@ export class Engine {
       if (this.setMode(step.mode, routine.name, { byWorkflow: true })) this.log.info(`Mode → ${step.mode}`);
     } catch (err) {
       this.log.error(err.message);
+    }
+  }
+
+  async #plexStep(step, event) {
+    try {
+      if (!this.plex) throw new Error('Plex is not set up');
+      const player = template(step.player ?? '', event).trim();
+      // no player named: the Plex player that triggered this workflow, else whatever is playing
+      const target = player ? { player } : event.source === 'plex' ? { playerId: event.playerId, player: event.player } : {};
+      const { player: name } = await this.plex.control(step.action ?? 'pause', target);
+      this.log.info(`Plex: ${step.action} on ${name}`);
+    } catch (err) {
+      this.log.error(`Plex ${step.action}: ${err.message}`);
+    }
+  }
+
+  async #rokuStep(step, event) {
+    const device = template(step.device ?? '', event);
+    try {
+      if (!this.roku) throw new Error('Roku control is not available');
+      if (step.app) await this.roku.launch(device, step.app);
+      else await this.roku.keypress(device, step.key ?? 'Play');
+      this.log.info(`Roku${device ? ` ${device}` : ''}: ${step.app ? `open ${step.app}` : step.key}`);
+    } catch (err) {
+      this.log.error(`Roku: ${err.message}`);
     }
   }
 

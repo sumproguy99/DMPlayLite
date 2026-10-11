@@ -68,6 +68,7 @@ export function createServer(app) {
       mode: engine.mode,
       modes: c.modes,
       waiting: engine.waiting,
+      rokus: engine.roku?.devices() ?? [],
       mqtt: { url: c.mqtt.url, username: c.mqtt.username, hasPassword: Boolean(c.mqtt.password), status: mqtt.status, topics: mqtt.topics.size },
       scenes: (c.scenes ?? []).map((s) => ({ id: s.id, name: s.name, lights: Object.keys(s.lights), savedAt: s.savedAt })),
       plex: { url: c.plex.url, hasToken: Boolean(c.plex.token), pollSeconds: c.plex.pollSeconds, status: plex.status },

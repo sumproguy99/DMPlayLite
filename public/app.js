@@ -51,9 +51,14 @@ const STEP_TYPES = [
   ['scene', '🎬', 'Scene'],
   ['capture', '📸', 'Save scene'],
   ['mqtt', '📡', 'MQTT message'],
+  ['plex', '▶️', 'Plex playback'],
+  ['roku', '📺', 'Roku remote'],
 ];
 const modeOptions = (selected, anyLabel) => `${anyLabel ? `<option value="">${anyLabel}</option>` : ''}${S.state.modes.map((m) => `<option value="${esc(m)}" ${selected === m ? 'selected' : ''}>${esc(m)}</option>`).join('')}`;
 const HUE_PRESSES = [['short_release', 'Short press'], ['long_press', 'Long press (hold)'], ['repeat', 'Held — repeats while held'], ['long_release', 'Released after holding'], ['initial_press', 'Pressed down (fastest)']];
+const PLEX_ACTIONS = [['pause', 'Pause'], ['play', 'Play / resume'], ['toggle', 'Pause or resume'], ['stop', 'Stop'], ['next', 'Next'], ['previous', 'Previous'], ['forward', 'Skip forward ~30 s'], ['back', 'Skip back ~10 s']];
+const ROKU_KEYS = [['Play', 'Play / pause'], ['Home', 'Home'], ['Back', 'Back'], ['Select', 'OK'], ['Rev', 'Rewind'], ['Fwd', 'Fast-forward'], ['InstantReplay', 'Instant replay'], ['VolumeUp', 'Volume up'], ['VolumeDown', 'Volume down'], ['VolumeMute', 'Mute'], ['PowerOff', 'Power off (Roku TV)'], ['PowerOn', 'Power on (Roku TV)']];
+const ROKU_APPS = ['plex', 'netflix', 'youtube', 'disney+', 'hulu', 'prime video', 'max', 'spotify'];
 const NTFY_PRIORITIES = [[1, 'Min'], [2, 'Low'], [3, 'Normal'], [4, 'High'], [5, 'Urgent']];
 const KIND_ICON = {
   phone: '📱', tablet: '📱', apple: '🍎', computer: '💻', printer: '🖨', router: '🛜', camera: '📷', doorbell: '🔔',
@@ -184,6 +189,8 @@ function describeStep(step) {
   if (step.type === 'ha') return `🏠 ${esc(step.service)} ${esc(step.data?.entity_id ?? '')}`;
   if (step.type === 'mode') return `🎭 house mode → <b>${esc(step.mode)}</b>`;
   if (step.type === 'mqtt') return `📡 ${esc(step.topic)} ← ${esc(typeof step.payload === 'object' ? JSON.stringify(step.payload) : step.payload ?? '')}${step.retain ? ' (retained)' : ''}`;
+  if (step.type === 'plex') return `▶️ Plex <b>${esc(PLEX_ACTIONS.find(([k]) => k === step.action)?.[1].toLowerCase() ?? step.action)}</b> on ${step.player ? esc(step.player) : 'the player that triggered it / is playing'}`;
+  if (step.type === 'roku') return `📺 Roku${step.device ? ` ${esc(step.device)}` : ''}: ${step.app ? `open <b>${esc(step.app)}</b>` : `<b>${esc(ROKU_KEYS.find(([k]) => k === step.key)?.[1] ?? step.key)}</b>`}`;
   if (step.type === 'scene') return `🎬 scene <b>${esc(step.scene)}</b>${step.transitionMs ? ` over ${sec(step.transitionMs)}s` : ''}`;
   if (step.type === 'capture') return `📸 save lights as scene <b>${esc(step.scene)}</b>${t}`;
   if (step.type === 'notify') return `📲 “${esc(step.title ? `${step.title}: ${step.message}` : step.message)}”${step.topic ? ` → ${esc(step.topic)}` : ''}${step.priority >= 4 ? ' (high priority)' : ''}`;
@@ -492,6 +499,26 @@ function stepEditor(step, i) {
       </div>
       <label class="field">Message (JSON or text)<textarea data-bind="${p}.payload" data-type="jsonish" rows="2" placeholder='{"state":"ON","brightness":200}'>${esc(typeof step.payload === 'object' ? JSON.stringify(step.payload) : step.payload ?? '')}</textarea></label>
       <p class="muted small" style="margin:0">Zigbee2MQTT: <code>zigbee2mqtt/&lt;name&gt;/set</code> with <code>{"state":"TOGGLE"}</code> · Tasmota: <code>cmnd/&lt;name&gt;/POWER</code> with <code>ON</code>. {{variables}} work.</p>`;
+  } else if (step.type === 'plex') {
+    const players = S.state.plex.status.players ?? [];
+    body = `<div class="fields">
+        <label class="field">Do<select data-bind="${p}.action">${PLEX_ACTIONS.map(([k, n]) => `<option value="${k}" ${step.action === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>
+        <label class="field grow">On player (name contains)<input type="text" data-bind="${p}.player" value="${esc(step.player)}" placeholder="the one that triggered it / is playing" list="plexplayers"></label>
+        <datalist id="plexplayers">${players.map((n) => `<option value="${esc(n)}">`).join('')}</datalist>
+      </div>
+      <p class="muted small" style="margin:0">E.g. doorbell → pause the movie. Works with players that allow remote control (Plex HTPC, Plex for Android TV / Fire TV / Apple TV / Roku, Plexamp…); some newer phone and desktop apps don't.${S.state.plex.status.connected ? '' : ' <span style="color:var(--warn)">Connect Plex under Connections first.</span>'}</p>`;
+  } else if (step.type === 'roku') {
+    const rokus = S.state.rokus ?? [];
+    const mode = step.app ? 'app' : 'key';
+    body = `<div class="fields">
+        <label class="field grow">Roku (name or IP)<input type="text" data-bind="${p}.device" value="${esc(step.device)}" placeholder="${rokus.length === 1 ? esc(rokus[0].name) : 'e.g. Living Room Roku'}" list="rokus"></label>
+        <datalist id="rokus">${rokus.map((r) => `<option value="${esc(r.name)}">`).join('')}</datalist>
+        <label class="field">Do<select data-rokumode="${i}"><option value="key" ${mode === 'key' ? 'selected' : ''}>Press a button</option><option value="app" ${mode === 'app' ? 'selected' : ''}>Open an app</option></select></label>
+        ${mode === 'key'
+          ? `<label class="field">Button<select data-bind="${p}.key">${ROKU_KEYS.map(([k, n]) => `<option value="${k}" ${step.key === k ? 'selected' : ''}>${n}</option>`).join('')}</select></label>`
+          : `<label class="field">App<input type="text" data-bind="${p}.app" value="${esc(step.app)}" list="rokuapps"></label><datalist id="rokuapps">${ROKU_APPS.map((a) => `<option value="${a}">`).join('')}</datalist>`}
+      </div>
+      <p class="muted small" style="margin:0">${rokus.length ? `Found: ${rokus.map((r) => esc(r.name)).join(', ')}. ` : 'No Roku found on the network yet. '}If it refuses, on the Roku turn on Settings → System → Advanced system settings → <b>Control by mobile apps</b>.</p>`;
   } else if (step.type === 'scene') {
     body = `<div class="fields">
         <label class="field grow">Scene<input type="text" data-bind="${p}.scene" value="${esc(step.scene)}" placeholder="scene name" list="scenenames"></label>
@@ -748,6 +775,17 @@ function wireEditor() {
     if (el.value === 'color') s.color = '#ff8a3d';
     renderEditor();
   }));
+  dlg.querySelectorAll('[data-rokumode]').forEach((el) => (el.onchange = () => {
+    const st = draft.steps[+el.dataset.rokumode];
+    if (el.value === 'app') {
+      delete st.key;
+      st.app = 'plex';
+    } else {
+      delete st.app;
+      st.key = 'Play';
+    }
+    renderEditor();
+  }));
   dlg.querySelectorAll('[data-customtargets]').forEach((el) => (el.onchange = () => {
     const s = draft.steps[+el.dataset.customtargets];
     if (el.checked) s.targets = [...(draft.targets ?? [])];
@@ -828,6 +866,8 @@ function newStep(type) {
   if (type === 'scene') return { type, scene: S.state.scenes?.[0]?.name ?? '', transitionMs: 2000 };
   if (type === 'capture') return { type, scene: '' };
   if (type === 'mqtt') return { type, topic: '', payload: '' };
+  if (type === 'plex') return { type, action: 'pause' };
+  if (type === 'roku') return { type, device: S.state.rokus?.length === 1 ? S.state.rokus[0].name : '', key: 'Play' };
   return { type: 'set', brightness: 50, transitionMs: 3000 };
 }
 
