@@ -1,7 +1,7 @@
 # Playlite
 
 A home-automation hub that lives on your network: **IF this happens → THEN do that.**
-It watches Plex, your Wi-Fi, Home Assistant, the clock and the sun; it controls Hue, Govee and
+It watches Plex, your Wi-Fi, Home Assistant, MQTT, Hue sensors, the clock and the sun; it controls Hue, Govee, WLED and
 Home Assistant lights (and anything else HA or a URL can reach); and you can talk to it
 through Alexa, Siri, or AI agents like Claude.
 
