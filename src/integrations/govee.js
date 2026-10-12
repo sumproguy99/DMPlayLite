@@ -90,8 +90,10 @@ export class GoveeDriver {
 
   // Manually register a device that didn't answer multicast discovery.
   async addByIp(ip) {
+    ip = String(ip ?? '').trim();
+    if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) throw new Error("Enter the light's IP address, e.g. 192.168.1.50");
     const status = await this.#status(ip);
-    if (!status) throw new Error(`No reply from ${ip}. Is LAN Control enabled in the Govee app?`);
+    if (!status) throw new Error(`No reply from ${ip}. Is LAN Control enabled in the Govee app? Another program on this PC that talks to Govee lights (SignalRGB, Govee Desktop, Home Assistant) can also take the replies — close it and try again.`);
     const id = `ip-${ip}`;
     this.devices[id] = { name: `Govee ${ip}`, ...this.devices[id], ip, sku: this.devices[id]?.sku ?? 'unknown' };
     this.saveDevices();

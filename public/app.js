@@ -1693,7 +1693,7 @@ function renderConnections() {
   });
   $('#govee-scan').onclick = guard(async (e) => busy(e.target, 'Scanning…', async () => {
     const res = await api('POST', '/api/govee/scan');
-    toast(`Found ${res.found.length} Govee device${res.found.length === 1 ? '' : 's'}`);
+    toast(res.found.length ? `Found ${res.found.length} Govee device${res.found.length === 1 ? '' : 's'}` : 'No Govee lights answered. Check LAN Control is on, and close other programs that control Govee lights on this PC (SignalRGB, Govee Desktop)');
     await Promise.all([refresh(), refreshLights()]);
   }));
   const addWled = (ip, btn) => guard(async () => busy(btn, 'Adding…', async () => {
