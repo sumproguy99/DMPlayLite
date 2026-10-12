@@ -103,10 +103,13 @@ The UI (`public/app.js`) is still hand-written per integration: the trigger fiel
 
 ## Run it all the time (Windows)
 
-Task Scheduler → *Create Task* → *At startup* → `node.exe` with argument `D:\aiprod\00-Playlite\src\index.js`,
-"Start in" `D:\aiprod\00-Playlite`, *Run whether user is logged on or not*.
+Task Scheduler → *Create Task* → *At startup*, *Run whether user is logged on or not* (or as SYSTEM) → program
+`cmd.exe` with arguments `/c <repo>\scripts\run-windows.cmd`. Under *Settings*, turn on "restart if the task fails" and
+turn off "stop the task if it runs longer than". The script starts Playlite from the repo folder and writes its output
+to `data\playlite.log`.
 Allow Node through Windows Firewall on **Private** networks: TCP 8787 (UI), TCP 80 + UDP 1900 (Alexa),
-UDP 4002 (Govee), UDP 5353 (discovery).
+UDP 4002 (Govee), UDP 5353 (discovery). Only one program can receive Govee replies on UDP 4002, so close other Govee
+controllers on the same PC (SignalRGB, Govee Desktop).
 
 ## Tests
 
